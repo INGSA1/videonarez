@@ -1,0 +1,7 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/schemas/
+# ffmpeg sidecar binaries (copied locally, ~100 MB each)
+src-tauri/binaries/*.exe
+testmedia/
