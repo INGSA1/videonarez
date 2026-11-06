@@ -1,0 +1,647 @@
+//! Фоновый захват: запуск FFmpeg по «лестнице» кандидатов, кольцевой буфер в ОЗУ,
+//! сохранение повтора по горячей клавише, обычная запись, статус и автоперезапуск.
+
+use super::audio::{list_inputs, AudioDevice, AudioFeed, AudioSource};
+use super::pipeline::{build_args, candidates, Candidate, Target};
+use super::ring::Ring;
+use super::sources::{self, GpuInfo, MonitorInfo, WindowInfo};
+use crate::config::gpu::{self, EncoderInfo};
+use crate::config::settings::{persist, CaptureSettings};
+use crate::error::{AppError, AppResult};
+use crate::ffmpeg::tools;
+use crate::state::AppState;
+use serde::Serialize;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter, Manager, State};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const NORMAL_PRIORITY: u32 = 0x0000_0020;
+const BELOW_NORMAL_PRIORITY: u32 = 0x0000_4000;
+
+pub struct Session {
+    child: Child,
+    pub ring: Arc<Mutex<Ring>>,
+    _audio: Vec<AudioFeed>,
+    audio_errors: Vec<Arc<Mutex<Option<String>>>>,
+    reader: Option<JoinHandle<()>>,
+    stderr: Arc<Mutex<String>>,
+    pub started: Instant,
+    pub pipeline: String,
+    pub zero_copy: bool,
+    pub encoder: String,
+    pub source: String,
+    pub prefix: String,
+    pub tracks: Vec<String>,
+    pub ffmpeg_pid: u32,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(h) = self.reader.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct Recorder {
+    pub session: Mutex<Option<Session>>,
+    starting: AtomicBool,
+    pub last_error: Mutex<Option<String>>,
+    pub last_clip: Mutex<Option<String>>,
+    stats: Mutex<Stats>,
+    restarts: Mutex<Vec<Instant>>,
+    /// Пользователь хочет, чтобы буфер работал (для автоперезапуска).
+    wanted: AtomicBool,
+}
+
+#[derive(Default, Clone, Copy)]
+struct Stats {
+    at: Option<Instant>,
+    frames: u64,
+    bytes: u64,
+    fps: f64,
+    kbps: f64,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureStatus {
+    pub running: bool,
+    pub starting: bool,
+    pub pipeline: String,
+    pub zero_copy: bool,
+    pub encoder: String,
+    pub source: String,
+    pub buffered_secs: f64,
+    pub buffer_mb: f64,
+    pub max_secs: f64,
+    pub fps: f64,
+    pub bitrate_kbps: f64,
+    pub recording_secs: Option<f64>,
+    pub uptime_secs: f64,
+    pub error: Option<String>,
+    pub audio_errors: Vec<String>,
+    pub last_clip: Option<String>,
+    pub ffmpeg_pid: Option<u32>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipSaved {
+    pub path: String,
+    pub duration: f64,
+    pub kind: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureSources {
+    pub gpu: Option<GpuInfo>,
+    pub monitors: Vec<MonitorInfo>,
+    pub windows: Vec<WindowInfo>,
+    pub mics: Vec<AudioDevice>,
+}
+
+// ---------- Запуск ----------
+
+fn resolve_target(cs: &CaptureSettings, monitors: &[MonitorInfo]) -> AppResult<Target> {
+    if cs.source == "window" {
+        let list = sources::windows();
+        let exe = cs.window_exe.to_lowercase();
+        let found = list
+            .iter()
+            .filter(|w| w.exe.to_lowercase() == exe)
+            .max_by_key(|w| (w.title == cs.window_title, w.width as i64 * w.height as i64))
+            .cloned();
+        if let Some(w) = &found {
+            if w.width == 0 {
+                return Err(AppError::msg(format!(
+                    "Окно «{}» свёрнуто — Windows не отдаёт кадры свёрнутых окон. Разверните его и включите буфер снова",
+                    w.title
+                )));
+            }
+        }
+        return found.map(Target::Window).ok_or_else(|| {
+            AppError::msg(format!(
+                "Окно «{}» не найдено — запустите приложение или выберите другой источник",
+                if cs.window_title.is_empty() { &cs.window_exe } else { &cs.window_title }
+            ))
+        });
+    }
+    monitors
+        .iter()
+        .find(|m| m.index == cs.monitor)
+        .or_else(|| monitors.first())
+        .cloned()
+        .map(Target::Monitor)
+        .ok_or_else(|| AppError::msg("Не найден ни один монитор"))
+}
+
+pub fn start(app: &AppHandle) -> AppResult<()> {
+    let state = app.state::<AppState>();
+    let rec = &state.recorder;
+    rec.wanted.store(true, Ordering::Relaxed);
+    if rec.session.lock().unwrap().is_some() {
+        return Ok(());
+    }
+    if rec.starting.swap(true, Ordering::SeqCst) {
+        return Err(AppError::msg("Захват уже запускается"));
+    }
+    emit_status(app);
+    let res = start_inner(app);
+    rec.starting.store(false, Ordering::SeqCst);
+    match &res {
+        Ok(()) => *rec.last_error.lock().unwrap() = None,
+        Err(e) => *rec.last_error.lock().unwrap() = Some(e.to_string()),
+    }
+    emit_status(app);
+    crate::shell::refresh_tray(app);
+    res
+}
+
+fn start_inner(app: &AppHandle) -> AppResult<()> {
+    let state = app.state::<AppState>();
+    let settings = state.settings();
+    let cs = settings.capture.clone();
+    let (_gpu, monitors) = sources::gpu_and_monitors();
+    let target = resolve_target(&cs, &monitors)?;
+    let codec = if cs.codec == "hevc" { "hevc" } else { "h264" };
+    let enc = gpu::pick(&settings.encoders, &cs.encoder, codec)
+        .ok_or_else(|| AppError::msg(format!("Нет кодировщика {} для записи", codec.to_uppercase())))?;
+
+    let mut audio: Vec<(AudioSource, String)> = Vec::new();
+    if cs.system_audio {
+        match (&target, cs.app_audio_only) {
+            (Target::Window(w), true) => audio.push((AudioSource::Process(w.pid), "Игра".into())),
+            _ => audio.push((AudioSource::System, "Системный звук".into())),
+        }
+    }
+    if cs.mic {
+        let id = (!cs.mic_device.is_empty()).then(|| cs.mic_device.clone());
+        audio.push((AudioSource::Mic(id), "Микрофон".into()));
+    }
+
+    let mut errors = Vec::new();
+    for cand in candidates(&target, &cs, &enc) {
+        match try_start(&cand, &enc, &cs, &target, &audio) {
+            Ok(sess) => {
+                *state.recorder.session.lock().unwrap() = Some(sess);
+                *state.recorder.stats.lock().unwrap() = Stats::default();
+                return Ok(());
+            }
+            Err(e) => errors.push(format!("{}: {}", cand.label, e)),
+        }
+    }
+    Err(AppError::msg(format!("Не удалось запустить захват.\n{}", errors.join("\n"))))
+}
+
+fn try_start(
+    cand: &Candidate,
+    enc: &EncoderInfo,
+    cs: &CaptureSettings,
+    target: &Target,
+    audio: &[(AudioSource, String)],
+) -> Result<Session, String> {
+    // Общая точка отсчёта для меток видео (RTCTIME) и часов звука.
+    let t0 = Instant::now();
+    let t0_unix_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros())
+        .unwrap_or(0);
+    let offset = cs.audio_offset_ms.clamp(-2000, 2000) as f64 / 1000.0;
+    let feeds: Vec<AudioFeed> = audio
+        .iter()
+        .map(|(src, _)| AudioFeed::start(src.clone(), t0, offset))
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("аудио: {e}"))?;
+    let urls: Vec<String> = feeds.iter().map(|f| f.url()).collect();
+    let args = build_args(cand, enc, cs, &urls, t0_unix_us);
+
+    let ffmpeg = tools().map_err(|e| e.to_string())?.ffmpeg.clone();
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW | NORMAL_PRIORITY);
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+
+    let ring = Arc::new(Mutex::new(Ring::new(cs.buffer_secs.clamp(5, 1800) as f64)));
+    let mut stdout = child.stdout.take().unwrap();
+    let ring2 = ring.clone();
+    let reader = std::thread::Builder::new()
+        .name("capture-reader".into())
+        .spawn(move || {
+            let mut buf = vec![0u8; 256 * 1024];
+            loop {
+                match stdout.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => ring2.lock().unwrap().push(&buf[..n]),
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+    let stderr_buf = Arc::new(Mutex::new(String::new()));
+    let mut stderr = child.stderr.take().unwrap();
+    let sb = stderr_buf.clone();
+    std::thread::spawn(move || {
+        let mut b = [0u8; 4096];
+        while let Ok(n) = stderr.read(&mut b) {
+            if n == 0 {
+                break;
+            }
+            let mut s = sb.lock().unwrap();
+            s.push_str(&String::from_utf8_lossy(&b[..n]));
+            if s.len() > 4000 {
+                let cut = s.len() - 2000;
+                let cut = (cut..s.len()).find(|&i| s.is_char_boundary(i)).unwrap_or(0);
+                s.drain(..cut);
+            }
+        }
+    });
+
+    // Ждём первый ключевой кадр.
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        if ring.lock().unwrap().has_keyframe() {
+            break;
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            std::thread::sleep(Duration::from_millis(100));
+            let err = stderr_buf.lock().unwrap().trim().to_string();
+            let _ = reader.join();
+            return Err(if err.is_empty() { format!("FFmpeg завершился ({status})") } else { last_line(&err) });
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            return Err("нет кадров за 8 секунд".into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    Ok(Session {
+        ffmpeg_pid: child.id(),
+        child,
+        ring,
+        audio_errors: feeds.iter().map(|f| f.error.clone()).collect(),
+        _audio: feeds,
+        reader: Some(reader),
+        stderr: stderr_buf,
+        started: Instant::now(),
+        pipeline: cand.label.clone(),
+        zero_copy: cand.zero_copy,
+        encoder: enc.name.clone(),
+        source: target.label(),
+        prefix: target.file_prefix(),
+        tracks: audio.iter().map(|(_, n)| n.clone()).collect(),
+    })
+}
+
+fn last_line(s: &str) -> String {
+    s.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or(s).trim().to_string()
+}
+
+pub fn stop(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    state.recorder.wanted.store(false, Ordering::Relaxed);
+    let sess = state.recorder.session.lock().unwrap().take();
+    if let Some(s) = sess {
+        let rec = s.ring.lock().unwrap().stop_recording();
+        let tracks = s.tracks.clone();
+        drop(s); // убивает FFmpeg
+        if let Some((ts, dur)) = rec {
+            finish_recording(app, ts, dur, tracks);
+        }
+    }
+    emit_status(app);
+    crate::shell::refresh_tray(app);
+}
+
+// ---------- Сохранение ----------
+
+fn output_dir(app: &AppHandle) -> PathBuf {
+    PathBuf::from(app.state::<AppState>().settings().output_dir)
+}
+
+fn unique(dir: &Path, stem: &str, ext: &str) -> PathBuf {
+    let p = dir.join(format!("{stem}.{ext}"));
+    if !p.exists() {
+        return p;
+    }
+    (2..1000)
+        .map(|i| dir.join(format!("{stem} ({i}).{ext}")))
+        .find(|p| !p.exists())
+        .unwrap_or(p)
+}
+
+/// TS → MP4 без перекодирования, с названиями звуковых дорожек.
+fn remux(ts: &Path, mp4: &Path, tracks: &[String]) -> Result<(), String> {
+    let ffmpeg = tools().map_err(|e| e.to_string())?.ffmpeg.clone();
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(["-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-i"]).arg(ts);
+    cmd.args(["-map", "0", "-c", "copy"]);
+    for (i, t) in tracks.iter().enumerate() {
+        cmd.arg(format!("-metadata:s:a:{i}")).arg(format!("title={t}"));
+        cmd.arg(format!("-metadata:s:a:{i}")).arg(format!("handler_name={t}"));
+    }
+    cmd.args(["-movflags", "+faststart", "-f", "mp4"]).arg(mp4);
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY);
+    let out = cmd.output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(crate::ffmpeg::tail(&out.stderr))
+    }
+}
+
+fn notify_saved(app: &AppHandle, path: &Path, duration: f64, kind: &str) {
+    let state = app.state::<AppState>();
+    let p = path.to_string_lossy().into_owned();
+    *state.recorder.last_clip.lock().unwrap() = Some(p.clone());
+    if state.settings().capture.sound {
+        sources::beep();
+    }
+    let _ = app.emit("clip-saved", ClipSaved { path: p, duration, kind: kind.into() });
+}
+
+/// Сохранить последние `secs` секунд буфера (None — весь буфер).
+pub fn save_replay(app: &AppHandle, secs: Option<f64>) -> AppResult<()> {
+    let state = app.state::<AppState>();
+    let (data, dur, prefix, tracks) = {
+        let g = state.recorder.session.lock().unwrap();
+        let s = g.as_ref().ok_or_else(|| AppError::msg("Буфер повтора не запущен"))?;
+        let ring = s.ring.lock().unwrap();
+        let secs = secs.unwrap_or(ring.max_secs);
+        let (data, dur) = ring.snapshot(secs).ok_or_else(|| AppError::msg("Буфер ещё пуст"))?;
+        (data, dur, s.prefix.clone(), s.tracks.clone())
+    };
+    let dir = output_dir(app);
+    std::fs::create_dir_all(&dir)?;
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let stem = format!("{prefix}_{}", sources::local_stamp());
+        let mp4 = unique(&dir, &stem, "mp4");
+        let ts = dir.join(format!(".{stem}.ts.part"));
+        let res = std::fs::write(&ts, &data)
+            .map_err(|e| e.to_string())
+            .and_then(|_| remux(&ts, &mp4, &tracks));
+        let _ = std::fs::remove_file(&ts);
+        match res {
+            Ok(()) => notify_saved(&app, &mp4, dur, "replay"),
+            Err(e) => {
+                let _ = std::fs::remove_file(&mp4);
+                *app.state::<AppState>().recorder.last_error.lock().unwrap() = Some(format!("Не удалось сохранить повтор: {e}"));
+                emit_status(&app);
+            }
+        }
+    });
+    Ok(())
+}
+
+fn finish_recording(app: &AppHandle, ts: PathBuf, dur: f64, tracks: Vec<String>) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let mp4 = ts.with_extension("mp4");
+        match remux(&ts, &mp4, &tracks) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&ts);
+                notify_saved(&app, &mp4, dur, "recording");
+            }
+            // Сырой .ts остаётся на диске — он читается и после сбоя.
+            Err(e) => {
+                *app.state::<AppState>().recorder.last_error.lock().unwrap() =
+                    Some(format!("Запись сохранена как .ts, но не перепакована в MP4: {e}"));
+                emit_status(&app);
+            }
+        }
+    });
+}
+
+/// Начать / остановить обычную запись (пишется тот же поток, что идёт в буфер).
+pub fn toggle_record(app: &AppHandle) -> AppResult<bool> {
+    let state = app.state::<AppState>();
+    if state.recorder.session.lock().unwrap().is_none() {
+        start(app)?;
+    }
+    let (stopped, tracks) = {
+        let g = state.recorder.session.lock().unwrap();
+        let s = g.as_ref().ok_or_else(|| AppError::msg("Захват не запущен"))?;
+        let mut ring = s.ring.lock().unwrap();
+        if ring.recording_secs().is_some() {
+            (ring.stop_recording(), s.tracks.clone())
+        } else {
+            let dir = output_dir(app);
+            std::fs::create_dir_all(&dir)?;
+            let stem = format!("{}_{}", s.prefix, sources::local_stamp());
+            ring.start_recording(unique(&dir, &stem, "ts"))?;
+            (None, Vec::new())
+        }
+    };
+    let now_recording = stopped.is_none();
+    if let Some((ts, dur)) = stopped {
+        finish_recording(app, ts, dur, tracks);
+    }
+    emit_status(app);
+    crate::shell::refresh_tray(app);
+    Ok(now_recording)
+}
+
+// ---------- Статус ----------
+
+pub fn status(app: &AppHandle) -> CaptureStatus {
+    let state = app.state::<AppState>();
+    let rec = &state.recorder;
+    let stats = *rec.stats.lock().unwrap();
+    let g = rec.session.lock().unwrap();
+    let mut st = CaptureStatus {
+        running: g.is_some(),
+        starting: rec.starting.load(Ordering::Relaxed),
+        pipeline: String::new(),
+        zero_copy: false,
+        encoder: String::new(),
+        source: String::new(),
+        buffered_secs: 0.0,
+        buffer_mb: 0.0,
+        max_secs: state.settings().capture.buffer_secs as f64,
+        fps: stats.fps,
+        bitrate_kbps: stats.kbps,
+        recording_secs: None,
+        uptime_secs: 0.0,
+        error: rec.last_error.lock().unwrap().clone(),
+        audio_errors: Vec::new(),
+        last_clip: rec.last_clip.lock().unwrap().clone(),
+        ffmpeg_pid: None,
+    };
+    if let Some(s) = g.as_ref() {
+        let ring = s.ring.lock().unwrap();
+        st.pipeline = s.pipeline.clone();
+        st.zero_copy = s.zero_copy;
+        st.encoder = s.encoder.clone();
+        st.source = s.source.clone();
+        st.buffered_secs = ring.buffered_secs().min(ring.max_secs);
+        st.buffer_mb = ring.buffered_bytes() as f64 / 1_048_576.0;
+        st.max_secs = ring.max_secs;
+        st.recording_secs = ring.recording_secs();
+        st.uptime_secs = s.started.elapsed().as_secs_f64();
+        st.ffmpeg_pid = Some(s.ffmpeg_pid);
+        st.audio_errors = s
+            .audio_errors
+            .iter()
+            .zip(&s.tracks)
+            .filter_map(|(e, t)| e.lock().unwrap().as_ref().map(|e| format!("{t}: {e}")))
+            .collect();
+        if let Some(e) = &ring.rec_error {
+            st.error = Some(format!("Ошибка записи на диск: {e}"));
+        }
+        if ring.no_keyframes {
+            st.error = Some("Кодировщик не выдаёт ключевые кадры — буфер сброшен для защиты памяти. Попробуйте другой кодировщик.".into());
+        }
+    }
+    st
+}
+
+pub fn emit_status(app: &AppHandle) {
+    let _ = app.emit("capture-status", status(app));
+}
+
+/// Фоновый поток: раз в секунду — FPS/битрейт, контроль жизни FFmpeg, автоперезапуск.
+pub fn spawn_monitor(app: AppHandle) {
+    std::thread::Builder::new()
+        .name("capture-monitor".into())
+        .spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(1));
+            let state = app.state::<AppState>();
+            let rec = &state.recorder;
+            let mut died: Option<String> = None;
+            {
+                let mut g = rec.session.lock().unwrap();
+                if let Some(s) = g.as_mut() {
+                    if let Ok(Some(code)) = s.child.try_wait() {
+                        let err = last_line(s.stderr.lock().unwrap().trim());
+                        died = Some(if err.is_empty() { format!("FFmpeg остановился ({code})") } else { err });
+                    } else {
+                        let (frames, bytes) = {
+                            let r = s.ring.lock().unwrap();
+                            (r.frames, r.total_bytes)
+                        };
+                        let mut st = rec.stats.lock().unwrap();
+                        let now = Instant::now();
+                        if let Some(at) = st.at {
+                            let dt = now.duration_since(at).as_secs_f64().max(0.001);
+                            st.fps = (frames - st.frames) as f64 / dt;
+                            st.kbps = (bytes - st.bytes) as f64 * 8.0 / 1000.0 / dt;
+                        }
+                        *st = Stats { at: Some(now), frames, bytes, ..*st };
+                    }
+                }
+                if died.is_some() {
+                    if let Some(s) = g.take() {
+                        let rec_file = s.ring.lock().unwrap().stop_recording();
+                        let tracks = s.tracks.clone();
+                        drop(s);
+                        if let Some((ts, dur)) = rec_file {
+                            finish_recording(&app, ts, dur, tracks);
+                        }
+                    }
+                }
+            }
+            if let Some(e) = died {
+                *rec.last_error.lock().unwrap() = Some(format!("Захват прервался: {e}"));
+                // Не больше 3 перезапусков в минуту (смена разрешения в игре, переключение fullscreen…).
+                let allow = {
+                    let mut r = rec.restarts.lock().unwrap();
+                    r.retain(|t| t.elapsed() < Duration::from_secs(60));
+                    r.push(Instant::now());
+                    r.len() <= 3
+                };
+                if allow && rec.wanted.load(Ordering::Relaxed) {
+                    let _ = start(&app);
+                }
+                crate::shell::refresh_tray(&app);
+            }
+            emit_status(&app);
+        })
+        .expect("spawn capture monitor");
+}
+
+// ---------- Команды ----------
+
+#[tauri::command]
+pub fn capture_sources() -> CaptureSources {
+    let (gpu, monitors) = sources::gpu_and_monitors();
+    CaptureSources { gpu, monitors, windows: sources::windows(), mics: list_inputs() }
+}
+
+#[tauri::command]
+pub async fn capture_start(app: AppHandle) -> AppResult<CaptureStatus> {
+    let a = app.clone();
+    tauri::async_runtime::spawn_blocking(move || start(&a))
+        .await
+        .map_err(|e| AppError::msg(e.to_string()))??;
+    Ok(status(&app))
+}
+
+#[tauri::command]
+pub async fn capture_stop(app: AppHandle) -> CaptureStatus {
+    let a = app.clone();
+    let _ = tauri::async_runtime::spawn_blocking(move || stop(&a)).await;
+    status(&app)
+}
+
+#[tauri::command]
+pub fn capture_status(app: AppHandle) -> CaptureStatus {
+    status(&app)
+}
+
+#[tauri::command]
+pub fn capture_save(app: AppHandle, secs: Option<f64>) -> AppResult<()> {
+    save_replay(&app, secs)
+}
+
+#[tauri::command]
+pub async fn capture_toggle_record(app: AppHandle) -> AppResult<bool> {
+    let a = app.clone();
+    tauri::async_runtime::spawn_blocking(move || toggle_record(&a))
+        .await
+        .map_err(|e| AppError::msg(e.to_string()))?
+}
+
+/// Сохранить настройки захвата, перерегистрировать хоткеи и перезапустить захват, если он шёл.
+#[tauri::command]
+pub async fn capture_apply_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    capture: CaptureSettings,
+) -> AppResult<Vec<String>> {
+    {
+        state.settings.write().unwrap().capture = capture;
+    }
+    persist(&state)?;
+    let hotkey_errors = crate::shell::register_hotkeys(&app);
+    let running = state.recorder.session.lock().unwrap().is_some();
+    if running {
+        let a = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            stop(&a);
+            start(&a)
+        })
+        .await
+        .map_err(|e| AppError::msg(e.to_string()))??;
+    }
+    Ok(hotkey_errors)
+}

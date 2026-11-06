@@ -14,6 +14,8 @@ pub struct AppState {
     pub export: Mutex<Option<CancellationToken>>,
     pub settings: RwLock<Settings>,
     pub settings_path: Mutex<Option<PathBuf>>,
+    /// Фоновый захват и буфер повтора.
+    pub recorder: crate::capture::recorder::Recorder,
 }
 
 impl AppState {

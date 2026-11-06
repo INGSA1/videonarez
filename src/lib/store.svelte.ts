@@ -4,6 +4,10 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { clamp } from "./format";
 import { cropRect, defaultExport, PRESETS } from "./presets";
 import type {
+  CaptureSettings,
+  CaptureSources,
+  CaptureStatus,
+  ClipSaved,
   ExportOptions,
   ExportProgress,
   ExportResult,
@@ -51,6 +55,18 @@ export const app = $state({
   tab: "clips" as "clips" | "export",
   showSettings: false,
   dragOver: false,
+
+  mode: "editor" as "editor" | "capture",
+  cap: {
+    status: null as CaptureStatus | null,
+    sources: null as CaptureSources | null,
+    draft: null as CaptureSettings | null,
+    dirty: false,
+    applying: false,
+    busy: false,
+    recent: [] as ClipSaved[],
+    hotkeyErrors: [] as string[],
+  },
 });
 
 /** Ссылка на <video> (не реактивная). */
@@ -79,15 +95,31 @@ export async function init() {
     if (e.payload.path === app.meta?.path) app.proxyPercent = e.payload.percent;
   });
 
+  await listen<CaptureStatus>("capture-status", (e) => {
+    app.cap.status = e.payload;
+  });
+  await listen<ClipSaved>("clip-saved", (e) => {
+    app.cap.recent.unshift(e.payload);
+    if (app.cap.recent.length > 30) app.cap.recent.pop();
+    toast(`${e.payload.kind === "replay" ? "Повтор" : "Запись"} сохранён(а): ${e.payload.path.split(/[\\/]/).pop()}`);
+  });
+  await listen<string>("capture-error", (e) => {
+    app.error = e.payload;
+  });
+
   try {
     app.settings = await invoke<Settings>("get_settings");
     const ui = app.settings.ui;
     if (ui && typeof ui === "object" && ui.opts) {
       app.opts = { ...defaultExport(), ...ui.opts, tracks: {} };
     }
+    if (ui && typeof ui === "object" && ui.mode === "capture") app.mode = "capture";
+    app.cap.draft = structuredClone($state.snapshot(app.settings.capture));
   } catch (e) {
     app.error = String(e);
   }
+  invoke<CaptureStatus>("capture_status").then((s) => (app.cap.status = s)).catch(() => {});
+  void refreshSources();
   // Определение GPU-кодировщиков (результат кэшируется; первый запуск — пара секунд в фоне).
   invoke<Settings["encoders"]>("detect_encoders", { force: false })
     .then((list) => app.settings && (app.settings.encoders = list))
@@ -106,7 +138,7 @@ export function scheduleSave() {
 export async function saveSettings() {
   if (!app.settings) return;
   const { tracks: _t, ...opts } = $state.snapshot(app.opts);
-  const s = { ...$state.snapshot(app.settings), ui: { opts } };
+  const s = { ...$state.snapshot(app.settings), ui: { opts, mode: app.mode } };
   try {
     await invoke("save_settings", { settings: s });
   } catch (e) {
@@ -433,4 +465,62 @@ export function cancelExport() {
 
 export function reveal(path: string) {
   void invoke("reveal_in_explorer", { path });
+}
+
+// ---------- Захват и буфер повтора ----------
+
+export async function refreshSources() {
+  try {
+    app.cap.sources = await invoke<CaptureSources>("capture_sources");
+  } catch (e) {
+    console.warn(e);
+  }
+}
+
+async function capCall<T>(cmd: string, args?: Record<string, unknown>): Promise<T | undefined> {
+  app.cap.busy = true;
+  try {
+    return await invoke<T>(cmd, args);
+  } catch (e) {
+    app.error = String(e);
+  } finally {
+    app.cap.busy = false;
+  }
+}
+
+export async function captureToggle() {
+  const running = app.cap.status?.running;
+  const st = await capCall<CaptureStatus>(running ? "capture_stop" : "capture_start");
+  if (st) app.cap.status = st;
+}
+
+export async function captureSave() {
+  await capCall("capture_save", { secs: null });
+}
+
+export async function captureRecord() {
+  await capCall("capture_toggle_record");
+}
+
+/** Применить настройки захвата: сохранить, перерегистрировать хоткеи, перезапустить захват. */
+export async function applyCapture() {
+  const d = app.cap.draft;
+  if (!d || !app.settings) return;
+  app.cap.applying = true;
+  try {
+    const errors = await invoke<string[]>("capture_apply_settings", { capture: $state.snapshot(d) });
+    app.settings.capture = structuredClone($state.snapshot(d));
+    app.cap.hotkeyErrors = errors;
+    app.cap.dirty = false;
+    toast(errors.length ? "Настройки применены, но часть горячих клавиш занята" : "Настройки захвата применены");
+  } catch (e) {
+    app.error = String(e);
+  } finally {
+    app.cap.applying = false;
+  }
+}
+
+export async function openInEditor(path: string) {
+  app.mode = "editor";
+  await openPath(path);
 }

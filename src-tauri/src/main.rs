@@ -1,15 +1,17 @@
 // Без консольного окна в релизной сборке Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod capture;
 mod config;
 mod editor;
 mod error;
 mod ffmpeg;
+mod shell;
 mod state;
 
 use error::AppResult;
 use state::AppState;
-use tauri::State;
+use tauri::{Manager, RunEvent, State};
 
 /// Показать файл в проводнике.
 #[tauri::command]
@@ -46,9 +48,20 @@ fn startup_file() -> Option<String> {
         .find(|a| !a.starts_with('-') && std::path::Path::new(a).is_file())
 }
 
+/// Показать главное окно (пересоздаёт WebView2, если окно было закрыто в трей).
+#[tauri::command]
+fn show_main_window(app: tauri::AppHandle) {
+    shell::show_main(&app);
+}
+
 fn main() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
+        // Повторный запуск (ярлык, «Открыть с помощью») показывает уже работающее окно из трея.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            shell::show_main(app);
+        }))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(AppState::default())
         // clip://localhost/<путь> — потоковая отдача видео плееру с поддержкой Range.
         .register_asynchronous_uri_scheme_protocol("clip", |ctx, request, responder| {
@@ -59,10 +72,19 @@ fn main() {
         })
         .setup(|app| {
             config::settings::init(app.handle())?;
+            shell::setup_tray(app.handle())?;
+            for e in shell::register_hotkeys(app.handle()) {
+                eprintln!("hotkey: {e}");
+            }
+            capture::recorder::spawn_monitor(app.handle().clone());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 config::gpu::ensure_detected(&handle).await;
                 editor::proxy::cleanup_old(&handle).await;
+                if handle.state::<AppState>().settings().capture.auto_start {
+                    let h = handle.clone();
+                    let _ = tauri::async_runtime::spawn_blocking(move || capture::recorder::start(&h)).await;
+                }
             });
             Ok(())
         })
@@ -82,7 +104,26 @@ fn main() {
             cancel_analysis,
             ffmpeg_version,
             startup_file,
+            show_main_window,
+            capture::recorder::capture_sources,
+            capture::recorder::capture_start,
+            capture::recorder::capture_stop,
+            capture::recorder::capture_status,
+            capture::recorder::capture_save,
+            capture::recorder::capture_toggle_record,
+            capture::recorder::capture_apply_settings,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Videonarez");
+        .build(tauri::generate_context!())
+        .expect("error while building Videonarez");
+
+    app.run(|app, event| match event {
+        // Последнее окно закрыто: WebView2 уже уничтожен, а приложение остаётся в трее.
+        RunEvent::ExitRequested { api, code: None, .. } => {
+            if app.state::<AppState>().settings().capture.close_to_tray {
+                api.prevent_exit();
+            }
+        }
+        RunEvent::Exit => capture::recorder::stop(app),
+        _ => {}
+    });
 }

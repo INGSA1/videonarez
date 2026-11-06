@@ -66,6 +66,88 @@ export interface Settings {
   cpuThreads: number;
   encoders: EncoderInfo[];
   ui: any;
+  capture: CaptureSettings;
+}
+
+export interface CaptureSettings {
+  source: "monitor" | "window";
+  monitor: number;
+  windowExe: string;
+  windowTitle: string;
+  fps: number;
+  height: number;
+  codec: "h264" | "hevc";
+  encoder: "auto" | Vendor;
+  bitrateMbps: number;
+  bufferSecs: number;
+  systemAudio: boolean;
+  appAudioOnly: boolean;
+  mic: boolean;
+  micDevice: string;
+  audioOffsetMs: number;
+  hotkeySave: string;
+  hotkeyRecord: string;
+  autoStart: boolean;
+  sound: boolean;
+  closeToTray: boolean;
+}
+
+export interface CaptureStatus {
+  running: boolean;
+  starting: boolean;
+  pipeline: string;
+  zeroCopy: boolean;
+  encoder: string;
+  source: string;
+  bufferedSecs: number;
+  bufferMb: number;
+  maxSecs: number;
+  fps: number;
+  bitrateKbps: number;
+  recordingSecs: number | null;
+  uptimeSecs: number;
+  error: string | null;
+  audioErrors: string[];
+  lastClip: string | null;
+  ffmpegPid: number | null;
+}
+
+export interface MonitorInfo {
+  index: number;
+  name: string;
+  width: number;
+  height: number;
+  x: number;
+  y: number;
+  primary: boolean;
+}
+
+export interface WindowInfo {
+  hwnd: number;
+  pid: number;
+  title: string;
+  exe: string;
+  width: number;
+  height: number;
+}
+
+export interface AudioDevice {
+  id: string;
+  name: string;
+  default: boolean;
+}
+
+export interface CaptureSources {
+  gpu: { name: string; vendorId: number; vendor: string } | null;
+  monitors: MonitorInfo[];
+  windows: WindowInfo[];
+  mics: AudioDevice[];
+}
+
+export interface ClipSaved {
+  path: string;
+  duration: number;
+  kind: "replay" | "recording";
 }
 
 export type TrimMode = "copy" | "smart" | "encode";

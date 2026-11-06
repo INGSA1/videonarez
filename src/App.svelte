@@ -10,7 +10,9 @@
   import SegmentList from "./components/SegmentList.svelte";
   import ExportPanel from "./components/ExportPanel.svelte";
   import SettingsModal from "./components/SettingsModal.svelte";
+  import CapturePanel from "./components/CapturePanel.svelte";
   import Icon from "./components/Icon.svelte";
+  import { fmtTime } from "./lib/format";
 
   let timeline: Timeline | undefined = $state();
 
@@ -31,11 +33,14 @@
     return () => unlisten?.();
   });
 
-  // Сохранять параметры экспорта между запусками.
+  // Сохранять параметры экспорта и выбранный режим между запусками.
   $effect(() => {
     JSON.stringify(app.opts);
+    void app.mode;
     scheduleSave();
   });
+
+  const cst = $derived(app.cap.status);
 
   function onKey(e: KeyboardEvent) {
     const tag = (e.target as HTMLElement)?.tagName;
@@ -50,7 +55,7 @@
       void startExport();
       return;
     }
-    if (typing || app.showSettings || !app.meta) return;
+    if (typing || app.showSettings || app.mode !== "editor" || !app.meta) return;
     const handled = () => e.preventDefault();
     switch (e.code) {
       case "Space": handled(); togglePlay(); break;
@@ -82,8 +87,18 @@
       <span class="logo"><Icon name="scissors" size={16} /></span>
       <b>Videonarez</b>
     </div>
+    <nav class="modes">
+      <button class:on={app.mode === "editor"} onclick={() => (app.mode = "editor")}><Icon name="scissors" size={14} /> Редактор</button>
+      <button class:on={app.mode === "capture"} onclick={() => (app.mode = "capture")}>
+        <span class="cdot" class:live={cst?.running} class:rec={cst?.recordingSecs != null}></span> Захват
+        {#if cst?.recordingSecs != null}<span class="mono rec-t">{fmtTime(cst.recordingSecs, 0)}</span>
+        {:else if cst?.running}<span class="mono dim">{Math.floor(cst.bufferedSecs)} с</span>{/if}
+      </button>
+    </nav>
+    {#if app.mode === "editor"}
     <button onclick={openFileDialog} title="Открыть видео (Ctrl+O)"><Icon name="open" /> Открыть</button>
-    {#if app.meta}
+    {/if}
+    {#if app.meta && app.mode === "editor"}
       {@const m = app.meta}
       <div class="file">
         <span class="name" title={m.path}>{m.fileName}</span>
@@ -100,6 +115,9 @@
   </header>
 
   <main>
+    {#if app.mode === "capture"}
+      <CapturePanel />
+    {:else}
     <div class="editor">
       {#if app.meta}
         <VideoPlayer />
@@ -139,6 +157,7 @@
         </div>
       {/if}
     </aside>
+    {/if}
   </main>
 
   {#if app.dragOver && app.meta}
@@ -186,6 +205,38 @@
     place-items: center;
     color: #fff;
     background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  }
+  .modes {
+    display: flex;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 2px;
+  }
+  .modes button {
+    border: none;
+    background: transparent;
+    padding: 5px 12px;
+    color: var(--text-2);
+  }
+  .modes button.on {
+    background: var(--panel-3);
+    color: var(--text);
+  }
+  .cdot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-3);
+  }
+  .cdot.live {
+    background: var(--ok);
+  }
+  .cdot.rec {
+    background: var(--accent-2);
+  }
+  .rec-t {
+    color: #ff9db5;
   }
   .file {
     display: flex;
