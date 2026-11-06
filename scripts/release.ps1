@@ -8,6 +8,10 @@
   3. Формирует latest.json и загружает установщик + latest.json на сервер (latest.json — последним,
      чтобы клиенты никогда не увидели версию, файл которой ещё не докачан).
   4. Проверяет, что latest.json отдаётся по HTTPS с новой версией.
+  5. Коммитит и пушит смену версии, затем создаёт релиз vX.Y.Z на GitHub на этом коммите
+     с установщиком и подписью. Если релиз уже есть — обновляет его файлы. -NoGitHub отключает шаг.
+
+  Длинное описание релиза удобнее передать файлом: -NotesFile notes.md (используется и для latest.json).
 
   Ключ подписи: %USERPROFILE%\.tauri\videonarez-updater.key (без пароля). Держите его в сохранности:
   без него следующее обновление подписать нельзя, а установленные копии примут только его подпись.
@@ -20,7 +24,9 @@ param(
   [string]$Server = "ingsal@84.201.181.80",
   [string]$RemoteDir = "/var/www/videonarez-updates",
   [string]$BaseUrl = "https://84-201-181-80.sslip.io/videonarez",
-  [switch]$SkipBuild
+  [string]$NotesFile,
+  [switch]$SkipBuild,
+  [switch]$NoGitHub
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -38,6 +44,11 @@ function Set-Version([string]$v) {
     $t = ([regex]$f.Pattern).Replace($t, $f.Value, $f.Count)
     [IO.File]::WriteAllText($f.Path, $t, $utf8)
   }
+}
+
+if ($NotesFile) {
+  if (-not (Test-Path $NotesFile)) { throw "Нет файла описания: $NotesFile" }
+  $Notes = [IO.File]::ReadAllText((Resolve-Path $NotesFile), [Text.Encoding]::UTF8).Trim()
 }
 
 if ($Version) { Set-Version $Version }
@@ -91,3 +102,42 @@ $check = Invoke-RestMethod -Uri "$BaseUrl/latest.json" -Headers @{ "Cache-Contro
 if ($check.version -ne $Version) { throw "Сервер отдаёт версию $($check.version), ожидалась $Version" }
 $head = Invoke-WebRequest -Uri "$BaseUrl/$exeName" -Method Head -UseBasicParsing
 Write-Host "Опубликовано: версия $($check.version), установщик $([math]::Round([int64]$head.Headers['Content-Length'] / 1MB, 1)) МБ по адресу $BaseUrl/$exeName"
+
+if ($NoGitHub) { return }
+
+# --- GitHub: тег ставится на коммит, из которого собрана эта версия ---
+# git и gh пишут служебные сообщения в stderr; в PowerShell 5.1 при "Stop" это превращается
+# в исключение даже при успехе, поэтому здесь проверяем только коды возврата.
+$ErrorActionPreference = "Continue"
+Push-Location $root
+try {
+  $versionFiles = @("src-tauri/tauri.conf.json", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock", "package.json", "package-lock.json")
+  $changed = git status --porcelain -- $versionFiles
+  if ($changed) {
+    git add -- $versionFiles
+    git commit -q -m "Release v$Version"
+    if ($LASTEXITCODE -ne 0) { throw "Не удалось закоммитить смену версии" }
+  }
+  git push -q
+  if ($LASTEXITCODE -ne 0) { throw "Не удалось отправить коммит на GitHub" }
+  $sha = (git rev-parse HEAD).Trim()
+
+  $tag = "v$Version"
+  $ghNotes = if ($Notes) { $Notes } else { "Videonarez $Version" }
+  $notesTmp = Join-Path ([IO.Path]::GetTempPath()) "videonarez-release-$Version.md"
+  [IO.File]::WriteAllText($notesTmp, "$ghNotes`n`nSHA-256 установщика: ``$((Get-FileHash $exe -Algorithm SHA256).Hash.ToLower())```n", $utf8)
+
+  gh release view $tag 2>$null | Out-Null
+  if ($LASTEXITCODE -eq 0) {
+    Write-Host "Релиз $tag уже есть на GitHub — обновляю файлы"
+    gh release upload $tag $exe $sig --clobber
+  } else {
+    gh release create $tag $exe $sig --target $sha --title "Videonarez $Version" --notes-file $notesTmp --latest
+  }
+  if ($LASTEXITCODE -ne 0) { throw "Не удалось создать или обновить релиз на GitHub" }
+  Remove-Item $notesTmp -ErrorAction SilentlyContinue
+  $url = (gh release view $tag --json url | ConvertFrom-Json).url
+  Write-Host "GitHub: $url"
+} finally {
+  Pop-Location
+}
