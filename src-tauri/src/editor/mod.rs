@@ -1,4 +1,5 @@
 pub mod encode;
+pub mod gallery;
 pub mod probe;
 pub mod proxy;
 pub mod queue;

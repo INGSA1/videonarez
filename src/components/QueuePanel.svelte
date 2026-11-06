@@ -30,10 +30,10 @@
           <span class="name" title={j.input}>{j.label}</span>
           <span class="st">{LABEL[j.status]}</span>
         </div>
-        <div class="dim meta">{MODE[j.mode] ?? j.mode}{j.elapsedSec ? ` · ${j.elapsedSec.toFixed(1)} с` : ""}</div>
+        <div class="dim meta">{MODE[j.mode] ?? j.mode}{j.elapsedSec ? `, ${j.elapsedSec.toFixed(1)} с` : ""}</div>
         {#if j.status === "running"}
           <div class="pbar"><span style="width:{app.progress.percent}%"></span></div>
-          <div class="dim meta">{app.progress.stage} · {app.progress.percent.toFixed(0)}%</div>
+          <div class="dim meta">{app.progress.stage}, {app.progress.percent.toFixed(0)}%</div>
         {/if}
         {#if j.error}<p class="err">{j.error}</p>{/if}
         {#each j.files as f (f)}
@@ -72,16 +72,16 @@
     padding: 10px;
     border-radius: var(--radius);
     background: var(--panel-2);
-    border: 1px solid var(--line);
+    border-left: 3px solid var(--line-2);
   }
   .job.running {
-    border-color: var(--accent);
+    border-color: var(--text);
   }
   .job.done {
-    border-color: rgba(61, 220, 151, 0.35);
+    border-color: var(--live);
   }
   .job.failed {
-    border-color: rgba(255, 93, 108, 0.5);
+    border-color: var(--err);
   }
   .top {
     display: flex;
@@ -106,7 +106,7 @@
     color: var(--err);
   }
   .running .st {
-    color: #ffb183;
+    color: var(--cue-text);
   }
   .meta {
     font-size: 11px;
@@ -120,7 +120,7 @@
   .pbar span {
     display: block;
     height: 100%;
-    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    background: var(--text);
     transition: width 0.25s;
   }
   .file {

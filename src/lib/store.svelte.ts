@@ -365,7 +365,7 @@ export function addSegment(start?: number, end?: number) {
   app.segments.push(seg);
   app.segments.sort((a, b) => a.start - b.start);
   app.selectedId = null;
-  toast(`Клип добавлен · всего ${app.segments.length}`);
+  toast(`Клип добавлен, в списке ${app.segments.length}`);
 }
 
 export function removeSegment(id: number) {
@@ -456,7 +456,7 @@ export async function startExport() {
   app.result = null;
   app.error = "";
   const busy = app.queue.some((j) => j.status === "running" || j.status === "queued");
-  const label = `${m.fileName} · ${segments.length > 1 ? `${segments.length} клипа(ов)` : "1 клип"}`;
+  const label = segments.length > 1 ? `${m.fileName}, клипов: ${segments.length}` : m.fileName;
   try {
     const id = await invoke<number>("queue_add", { req, label });
     app.currentJob = id;

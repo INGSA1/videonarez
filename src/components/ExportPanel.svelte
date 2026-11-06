@@ -11,12 +11,12 @@
   const encoders = $derived(app.settings?.encoders ?? []);
 
   const MODES: { id: TrimMode; label: string; icon: string; hint: string }[] = [
-    { id: "copy", label: "Мгновенно", icon: "bolt", hint: "Без перекодирования: ~0 нагрузки, без потери качества. Режет по ключевым кадрам — начало может сдвинуться на долю секунды." },
+    { id: "copy", label: "Мгновенно", icon: "bolt", hint: "Без перекодирования: почти без нагрузки и без потери качества. Режет по ключевым кадрам, поэтому начало может сдвинуться на долю секунды." },
     { id: "smart", label: "Точно", icon: "target", hint: "Перекодируется только кусочек до первого ключевого кадра, остальное копируется. Точность до кадра за 1–2 секунды." },
-    { id: "encode", label: "Сжать / изменить", icon: "chip", hint: "Полное перекодирование на видеокарте: разрешение, FPS, кадрирование, размер под Discord." },
+    { id: "encode", label: "Перекодировать", icon: "chip", hint: "Полное перекодирование на видеокарте: разрешение, частота кадров, кадрирование, размер под Discord." },
   ];
 
-  const VENDORS: Record<Vendor, string> = { nvenc: "NVIDIA NVENC", amf: "AMD AMF", qsv: "Intel QuickSync", cpu: "CPU (x264/x265)" };
+  const VENDORS: Record<Vendor, string> = { nvenc: "NVIDIA NVENC", amf: "AMD AMF", qsv: "Intel QuickSync", cpu: "Процессор (x264, x265)" };
   const CODECS: { id: Codec; label: string }[] = [
     { id: "h264", label: "H.264" },
     { id: "hevc", label: "HEVC" },
@@ -61,7 +61,7 @@
     }
     if (o.rate === "size") {
       const kbps = (o.targetMb * 8192) / Math.max(0.1, per) * 0.97 - (o.mute ? 0 : o.audioBitrateKbps);
-      return `≤ ${o.targetMb} МБ на файл · видео ~${Math.max(0, Math.round(kbps))} кбит/с`;
+      return `Не больше ${o.targetMb} МБ на файл, видео около ${Math.max(0, Math.round(kbps))} кбит/с`;
     }
     if (o.rate === "bitrate") return `≈ ${fmtBytes(((o.bitrateKbps + (o.mute ? 0 : o.audioBitrateKbps)) * 1000 / 8) * totalDur)} всего`;
     return "размер зависит от динамики сцены";
@@ -110,7 +110,7 @@
 
   {#if o.mode === "encode"}
     <section>
-      <h4>Пресет</h4>
+      <h3 class="h">Пресет</h3>
       <div class="presets">
         {#each Object.entries(PRESETS) as [key, p] (key)}
           <button class="chip" class:active={o.preset === key} title={p.hint} onclick={() => applyPreset(key)}>{p.label}</button>
@@ -130,7 +130,7 @@
       <label>
         <span>Кодировщик</span>
         <select bind:value={o.encoder} onchange={custom}>
-          <option value="auto">Авто{activeEncoder && o.encoder === "auto" ? ` · ${VENDORS[activeEncoder.vendor]}` : ""}</option>
+          <option value="auto">{activeEncoder && o.encoder === "auto" ? `Выбрать сам (${VENDORS[activeEncoder.vendor]})` : "Выбрать сам"}</option>
           {#each vendorsFor as v (v)}<option value={v}>{VENDORS[v]}</option>{/each}
         </select>
       </label>
@@ -151,7 +151,7 @@
     </section>
 
     <section>
-      <h4><Icon name="crop" size={13} /> Кадрирование</h4>
+      <h3 class="h"><Icon name="crop" size={13} /> Кадрирование</h3>
       <div class="presets">
         {#each ASPECT_KEYS as a (a)}
           <button class="chip" class:active={o.aspect === a} onclick={() => { o.aspect = a; o.cropX = 0.5; o.cropY = 0.5; custom(); }}>
@@ -163,7 +163,7 @@
     </section>
 
     <section>
-      <h4>Качество / размер</h4>
+      <h3 class="h">Качество / размер</h3>
       <div class="seg wide">
         <button class:active={o.rate === "quality"} onclick={() => { o.rate = "quality"; custom(); }}>Качество</button>
         <button class:active={o.rate === "bitrate"} onclick={() => { o.rate = "bitrate"; custom(); }}>Битрейт</button>
@@ -194,7 +194,7 @@
 
     {#if m && m.audioTracks.length}
       <section>
-        <h4>Звук</h4>
+        <h3 class="h">Звук</h3>
         <label class="check"><input type="checkbox" bind:checked={o.mute} /> Без звука</label>
         {#if !o.mute}
           {#each m.audioTracks as t (t.index)}
@@ -204,7 +204,7 @@
               <label class="check">
                 <input type="checkbox" bind:checked={to.enabled} />
                 {t.title || `Дорожка ${t.index + 1}`}
-                <span class="dim">{t.codec} · {t.channels}ch</span>
+                <span class="dim">{t.codec}, {t.channels === 1 ? "моно" : `${t.channels} канала`}</span>
               </label>
               <input type="range" min="0" max="2" step="0.05" bind:value={to.volume} disabled={!to.enabled} />
               <span class="mono val">{Math.round(to.volume * 100)}%</span>
@@ -242,7 +242,7 @@
   {/if}
 
   <section>
-    <h4>Папка</h4>
+    <h3 class="h">Папка</h3>
     <button class="dir" onclick={pickDir} title={app.settings?.outputDir}>
       <Icon name="folder" /> <span class="path">{app.settings?.outputDir ?? "—"}</span>
     </button>
@@ -250,7 +250,7 @@
 
   <div class="footer">
     <div class="summary">
-      <div><b>{files}</b> файл(ов) · <span class="mono">{fmtDur(totalDur)}</span>{#if o.mode === "encode"} · {outRes} · {o.codec.toUpperCase()}{/if}</div>
+      <div><b>{files === 1 ? "Один файл" : `Файлов: ${files}`}</b>, <span class="mono">{fmtDur(totalDur)}</span>{#if o.mode === "encode"}, {outRes}, {o.codec.toUpperCase()}{/if}</div>
       <div class="dim">{estimate}</div>
     </div>
 
@@ -258,14 +258,14 @@
       <div class="progress">
         <div class="pbar"><span style="width:{app.progress.percent}%"></span></div>
         <div class="pinfo">
-          <span>{app.progress.stage}{app.progress.total > 1 ? ` · ${app.progress.current}/${app.progress.total}` : ""}</span>
+          <span>{app.progress.stage}{app.progress.total > 1 ? `, клип ${app.progress.current} из ${app.progress.total}` : ""}</span>
           <span class="mono">{app.progress.percent.toFixed(0)}%</span>
         </div>
         <button onclick={() => cancelExport()}><Icon name="x" /> Отменить</button>
       </div>
     {:else if app.exporting && curJob?.status === "queued"}
       <div class="progress">
-        <div class="pinfo"><span>В очереди · перед ним заданий: {queuePos}</span></div>
+        <div class="pinfo"><span>В очереди, перед ним заданий: {queuePos}</span></div>
         <button onclick={() => cancelExport()}><Icon name="x" /> Убрать из очереди</button>
       </div>
     {/if}
@@ -273,7 +273,7 @@
       <Icon name="scissors" /> {queueBusy ? "Добавить в очередь" : "Экспортировать"} <kbd>Ctrl+E</kbd>
     </button>
     {#if queueBusy}
-      <button class="ghost qlink" onclick={() => (app.tab = "queue")}>Очередь экспорта: {activeJobs} в работе →</button>
+      <button class="ghost qlink" onclick={() => (app.tab = "queue")}>Открыть очередь, заданий в работе: {activeJobs}</button>
     {/if}
 
     {#if app.result}
@@ -300,17 +300,6 @@
     display: grid;
     gap: 8px;
   }
-  h4 {
-    margin: 0;
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-3);
-    font-weight: 600;
-    display: flex;
-    align-items: center;
-    gap: 5px;
-  }
   .modes {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
@@ -333,9 +322,9 @@
     gap: 5px;
   }
   .chip {
-    padding: 3px 9px;
-    border-radius: 20px;
+    padding: 5px 9px;
     font-size: 12px;
+    font-weight: 400;
   }
   .chip.small {
     padding: 2px 7px;
@@ -426,7 +415,7 @@
     display: grid;
     gap: 10px;
     padding: 12px 0 2px;
-    background: linear-gradient(to bottom, transparent, var(--panel) 14px);
+    background: var(--panel);
   }
   .summary {
     font-size: 12px;
@@ -440,9 +429,9 @@
     font-size: 14px;
   }
   .go kbd {
-    background: rgba(0, 0, 0, 0.2);
-    border-color: rgba(255, 255, 255, 0.25);
-    color: #fff;
+    background: rgba(27, 28, 30, 0.14);
+    color: var(--cue-ink);
+    box-shadow: none;
   }
   .progress {
     display: grid;
@@ -462,7 +451,7 @@
   .pbar span {
     display: block;
     height: 100%;
-    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    background: var(--text);
     transition: width 0.25s;
   }
   .pinfo {
@@ -476,8 +465,8 @@
     gap: 4px;
     padding: 10px;
     border-radius: var(--radius);
-    background: rgba(61, 220, 151, 0.07);
-    border: 1px solid rgba(61, 220, 151, 0.3);
+    background: var(--panel-2);
+    border-left: 3px solid var(--live);
   }
   .ok {
     color: var(--ok);

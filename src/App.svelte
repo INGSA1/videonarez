@@ -4,7 +4,7 @@
     app, init, openFileDialog, openPath, togglePlay, step, skip, setIn, setOut, addSegment,
     removeSegment, playRange, startExport, scheduleSave, player, VIDEO_EXT,
   } from "./lib/store.svelte";
-  import { fmtBytes, codecLabel } from "./lib/format";
+  import { fmtBytes, codecLabel, fmtTime } from "./lib/format";
   import VideoPlayer from "./components/VideoPlayer.svelte";
   import Timeline from "./components/Timeline.svelte";
   import SegmentList from "./components/SegmentList.svelte";
@@ -13,7 +13,7 @@
   import CapturePanel from "./components/CapturePanel.svelte";
   import QueuePanel from "./components/QueuePanel.svelte";
   import Icon from "./components/Icon.svelte";
-  import { fmtTime } from "./lib/format";
+  import Timecode from "./components/Timecode.svelte";
 
   let timeline: Timeline | undefined = $state();
 
@@ -43,6 +43,20 @@
 
   const cst = $derived(app.cap.status);
   const activeJobs = $derived(app.queue.filter((j) => j.status === "queued" || j.status === "running").length);
+  const capState = $derived(
+    cst?.recordingSecs != null ? "rec" : cst?.running ? "live" : cst?.waitingForGame ? "wait" : "off",
+  );
+
+  // Сведения о файле обычной фразой, а не строкой «чипсов».
+  const fileFacts = $derived.by(() => {
+    const m = app.meta;
+    if (!m) return "";
+    const parts: string[] = [];
+    if (m.hasVideo) parts.push(`${m.width}×${m.height}`, `${+m.fps.toFixed(2)} кадров/с`, codecLabel(m.videoCodec));
+    if (m.audioTracks.length) parts.push(m.audioTracks.length === 1 ? "1 дорожка звука" : `${m.audioTracks.length} дорожки звука`);
+    parts.push(fmtBytes(m.sizeBytes));
+    return parts.join(", ");
+  });
 
   function onKey(e: KeyboardEvent) {
     const tag = (e.target as HTMLElement)?.tagName;
@@ -85,85 +99,84 @@
 
 <div class="shell">
   <header class="top">
-    <div class="brand">
-      <span class="logo"><Icon name="scissors" size={16} /></span>
-      <b>Videonarez</b>
-    </div>
-    <nav class="modes">
-      <button class:on={app.mode === "editor"} onclick={() => (app.mode = "editor")}><Icon name="scissors" size={14} /> Редактор</button>
+    <span class="wordmark">videonarez</span>
+
+    <nav class="modes" aria-label="Режим">
+      <button class:on={app.mode === "editor"} onclick={() => (app.mode = "editor")}>Редактор</button>
       <button class:on={app.mode === "capture"} onclick={() => (app.mode = "capture")}>
-        <span class="cdot" class:live={cst?.running} class:wait={cst?.waitingForGame} class:rec={cst?.recordingSecs != null}></span> Захват
-        {#if cst?.recordingSecs != null}<span class="mono rec-t">{fmtTime(cst.recordingSecs, 0)}</span>
-        {:else if cst?.running}<span class="mono dim">{Math.floor(cst.bufferedSecs)} с</span>{/if}
+        <span class="tally {capState}" aria-hidden="true"></span> Захват
+        {#if cst?.recordingSecs != null}<Timecode value={fmtTime(cst.recordingSecs, 0)} size={11} tone="tally" />
+        {:else if cst?.running}<Timecode value={fmtTime(Math.floor(cst.bufferedSecs), 0)} size={11} tone="dim" />{/if}
       </button>
     </nav>
+
     {#if app.mode === "editor"}
-    <button onclick={openFileDialog} title="Открыть видео (Ctrl+O)"><Icon name="open" /> Открыть</button>
+      {#if app.meta}
+        <div class="file">
+          <span class="name" title={app.meta.path}>{app.meta.fileName}</span>
+          <span class="facts">{fileFacts}{#if app.usingProxy}<span class="proxy" title="Формат не воспроизводится напрямую. Экспорт всё равно идёт из оригинала."> Предпросмотр через облегчённую копию</span>{/if}</span>
+        </div>
+      {/if}
+      <div class="spacer"></div>
+      <button onclick={openFileDialog} title="Ctrl+O"><Icon name="open" /> Открыть видео</button>
+    {:else}
+      <div class="spacer"></div>
     {/if}
-    {#if app.meta && app.mode === "editor"}
-      {@const m = app.meta}
-      <div class="file">
-        <span class="name" title={m.path}>{m.fileName}</span>
-        <span class="chips">
-          {#if m.hasVideo}<span class="chip">{m.width}×{m.height}</span><span class="chip">{+m.fps.toFixed(2)} fps</span><span class="chip">{codecLabel(m.videoCodec)}</span>{/if}
-          {#if m.audioTracks.length}<span class="chip">{m.audioTracks.length} аудио</span>{/if}
-          <span class="chip">{fmtBytes(m.sizeBytes)}</span>
-          {#if app.usingProxy}<span class="chip warn" title="Предпросмотр идёт через облегчённую копию; экспорт — из оригинала">прокси</span>{/if}
-        </span>
-      </div>
-    {/if}
-    <div class="spacer"></div>
-    <button class="ghost icon" title="Настройки" onclick={() => (app.showSettings = true)}><Icon name="gear" size={18} /></button>
+    <button class="ghost icon" title="Настройки" onclick={() => (app.showSettings = true)}><Icon name="gear" size={17} /></button>
   </header>
 
   <main>
     {#if app.mode === "capture"}
       <CapturePanel />
     {:else}
-    <div class="editor">
-      {#if app.meta}
-        <VideoPlayer />
-        <Timeline bind:this={timeline} />
-      {:else}
-        <div class="welcome">
-          <div class="drop" class:over={app.dragOver}>
-            <div class="big"><Icon name="scissors" size={40} /></div>
-            <h2>Перетащите видео сюда</h2>
-            <p class="muted">MP4, MKV, MOV, WebM, AVI и другие. Файл не загружается в память — читаются только нужные куски.</p>
-            <button class="primary" onclick={openFileDialog} disabled={app.loading}>
-              <Icon name="open" /> {app.loading ? "Открываю…" : "Выбрать файл"}
-            </button>
-            <p class="dim keys"><kbd>I</kbd>/<kbd>O</kbd> — начало и конец · <kbd>Enter</kbd> — клип · <kbd>Ctrl+E</kbd> — экспорт</p>
-          </div>
-        </div>
-      {/if}
-    </div>
-
-    <aside>
-      <nav class="tabs">
-        <button class:on={app.tab === "clips"} onclick={() => (app.tab = "clips")}>
-          Клипы {#if app.segments.length}<span class="badge">{app.segments.length}</span>{/if}
-        </button>
-        <button class:on={app.tab === "export"} onclick={() => (app.tab = "export")}>Экспорт</button>
-        <button class:on={app.tab === "queue"} onclick={() => (app.tab = "queue")}>
-          Очередь {#if activeJobs}<span class="badge">{activeJobs}</span>{/if}
-        </button>
-      </nav>
-      <div class="side-body">
-        {#if app.tab === "clips"}
-          <SegmentList />
-        {:else if app.tab === "export"}
-          <ExportPanel />
+      <div class="editor">
+        {#if app.meta}
+          <VideoPlayer />
+          <Timeline bind:this={timeline} />
         {:else}
-          <QueuePanel />
+          <div class="welcome">
+            <div class="drop" class:over={app.dragOver}>
+              <h2>Перетащите видео в окно</h2>
+              <p>Подойдёт запись из игры, MP4, MKV, MOV или WebM. Файл не загружается в память целиком, поэтому даже двухчасовой стрим открывается сразу.</p>
+              <button class="primary" onclick={openFileDialog} disabled={app.loading}>
+                <Icon name="open" /> {app.loading ? "Открываю" : "Открыть видео"}
+              </button>
+            </div>
+            <dl class="keys">
+              <div><dt><kbd>I</kbd> <kbd>O</kbd></dt><dd>начало и конец клипа</dd></div>
+              <div><dt><kbd>Enter</kbd></dt><dd>добавить клип в список</dd></div>
+              <div><dt><kbd>Пробел</kbd></dt><dd>пуск и пауза</dd></div>
+              <div><dt><kbd>Ctrl</kbd> <kbd>E</kbd></dt><dd>экспорт</dd></div>
+            </dl>
+          </div>
         {/if}
       </div>
-      {#if app.tab === "clips" && app.meta}
-        <div class="side-foot">
-          <button class="primary" onclick={() => (app.tab = "export")}>Далее: экспорт →</button>
+
+      <aside>
+        <nav class="tabs">
+          <button class:on={app.tab === "clips"} onclick={() => (app.tab = "clips")}>
+            Клипы {#if app.segments.length}<span class="count">{app.segments.length}</span>{/if}
+          </button>
+          <button class:on={app.tab === "export"} onclick={() => (app.tab = "export")}>Экспорт</button>
+          <button class:on={app.tab === "queue"} onclick={() => (app.tab = "queue")}>
+            Очередь {#if activeJobs}<span class="count">{activeJobs}</span>{/if}
+          </button>
+        </nav>
+        <div class="side-body">
+          {#if app.tab === "clips"}
+            <SegmentList />
+          {:else if app.tab === "export"}
+            <ExportPanel />
+          {:else}
+            <QueuePanel />
+          {/if}
         </div>
-      {/if}
-    </aside>
+        {#if app.tab === "clips" && app.meta}
+          <div class="side-foot">
+            <button class="primary" onclick={() => (app.tab = "export")}>Перейти к экспорту</button>
+          </div>
+        {/if}
+      </aside>
     {/if}
   </main>
 
@@ -172,12 +185,12 @@
   {/if}
 
   {#if app.error}
-    <div class="error">
+    <div class="error" role="alert">
       <span>{app.error}</span>
-      <button class="ghost icon" onclick={() => (app.error = "")}><Icon name="x" /></button>
+      <button class="ghost icon" title="Скрыть" onclick={() => (app.error = "")}><Icon name="x" /></button>
     </div>
   {/if}
-  {#if app.toast}<div class="toast">{app.toast}</div>{/if}
+  {#if app.toast}<div class="toast" role="status">{app.toast}</div>{/if}
 
   {#if app.showSettings}<SettingsModal />{/if}
 </div>
@@ -191,67 +204,59 @@
   .top {
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 8px 12px;
+    gap: 18px;
+    padding: 0 12px 0 18px;
+    height: 48px;
     background: var(--panel);
     border-bottom: 1px solid var(--line);
-    min-height: 48px;
+    flex-shrink: 0;
   }
-  .brand {
-    display: flex;
-    align-items: center;
-    gap: 8px;
+  .wordmark {
+    font-family: var(--tc);
+    font-weight: 500;
     font-size: 14px;
-    letter-spacing: 0.01em;
-  }
-  .logo {
-    width: 26px;
-    height: 26px;
-    border-radius: 7px;
-    display: grid;
-    place-items: center;
-    color: #fff;
-    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: var(--text);
   }
   .modes {
     display: flex;
-    background: var(--bg);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    padding: 2px;
+    gap: 2px;
+    height: 100%;
   }
   .modes button {
-    border: none;
+    height: 100%;
+    border-radius: 0;
     background: transparent;
-    padding: 5px 12px;
-    color: var(--text-2);
+    color: var(--text-3);
+    padding: 0 12px;
+    box-shadow: inset 0 -2px 0 transparent;
   }
-  .modes button.on {
-    background: var(--panel-3);
+  .modes button:hover:not(:disabled) {
+    background: transparent;
     color: var(--text);
   }
-  .cdot {
+  .modes button.on {
+    color: var(--text);
+    box-shadow: inset 0 -2px 0 var(--text);
+  }
+  .tally {
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: var(--text-3);
+    background: var(--line-2);
   }
-  .cdot.live {
-    background: var(--ok);
+  .tally.live {
+    background: var(--live);
   }
-  .cdot.wait {
-    background: var(--warn);
+  .tally.wait {
+    background: var(--hold);
   }
-  .cdot.rec {
-    background: var(--accent-2);
-  }
-  .rec-t {
-    color: #ff9db5;
+  .tally.rec {
+    background: var(--tally);
   }
   .file {
     display: flex;
-    align-items: center;
-    gap: 10px;
+    align-items: baseline;
+    gap: 12px;
     min-width: 0;
   }
   .name {
@@ -259,23 +264,16 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    max-width: 360px;
+    max-width: 340px;
   }
-  .chips {
-    display: flex;
-    gap: 4px;
-  }
-  .chip {
-    font-size: 11px;
-    padding: 2px 7px;
-    border-radius: 10px;
-    background: var(--panel-3);
-    color: var(--text-2);
+  .facts {
+    color: var(--text-3);
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
-  .chip.warn {
-    color: var(--warn);
-    background: rgba(255, 194, 75, 0.12);
+  .proxy {
+    color: var(--hold);
   }
   .spacer {
     flex: 1;
@@ -292,7 +290,7 @@
     flex-direction: column;
   }
   aside {
-    width: 360px;
+    width: 348px;
     flex-shrink: 0;
     background: var(--panel);
     border-left: 1px solid var(--line);
@@ -302,93 +300,115 @@
   }
   .tabs {
     display: flex;
+    padding: 0 8px;
     border-bottom: 1px solid var(--line);
   }
   .tabs button {
-    flex: 1;
-    justify-content: center;
-    border: none;
-    border-radius: 0;
     background: transparent;
-    padding: 11px;
-    color: var(--text-2);
-    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    padding: 13px 10px 11px;
+    color: var(--text-3);
+    box-shadow: inset 0 -2px 0 transparent;
+  }
+  .tabs button:hover:not(:disabled) {
+    background: transparent;
+    color: var(--text);
   }
   .tabs button.on {
     color: var(--text);
-    border-bottom-color: var(--accent);
+    box-shadow: inset 0 -2px 0 var(--text);
   }
-  .badge {
+  .count {
     font-size: 11px;
-    background: var(--accent);
-    color: #fff;
-    border-radius: 10px;
-    padding: 0 6px;
+    color: var(--text-2);
+    background: var(--panel-3);
+    border-radius: 9px;
+    padding: 1px 6px;
   }
   .side-body {
     flex: 1;
     min-height: 0;
     overflow: auto;
-    padding: 14px;
+    padding: 16px;
     display: flex;
     flex-direction: column;
   }
   .side-foot {
-    padding: 12px 14px;
+    padding: 12px 16px;
     border-top: 1px solid var(--line);
   }
   .side-foot button {
     width: 100%;
     justify-content: center;
-    padding: 9px;
+    padding: 10px;
   }
+
+  /* --- Пустой редактор --- */
   .welcome {
     flex: 1;
     display: grid;
-    place-items: center;
-    padding: 24px;
+    align-content: center;
+    justify-items: start;
+    gap: 28px;
+    padding: 48px clamp(24px, 8vw, 120px);
   }
   .drop {
-    width: min(560px, 100%);
-    padding: 48px 32px;
-    border: 2px dashed var(--line-2);
-    border-radius: 16px;
-    text-align: center;
+    width: min(620px, 100%);
+    padding: 36px;
+    border: 1px dashed var(--line-2);
+    border-radius: var(--radius-lg);
     display: grid;
-    gap: 12px;
-    justify-items: center;
-    transition: border-color 0.15s, background 0.15s;
+    gap: 14px;
+    justify-items: start;
   }
   .drop.over {
-    border-color: var(--accent);
-    background: var(--accent-soft);
+    border-color: var(--cue);
+    background: var(--cue-soft);
   }
   .drop h2 {
     margin: 0;
-    font-size: 20px;
+    font-size: 22px;
+    font-weight: 600;
   }
   .drop p {
     margin: 0;
-    max-width: 420px;
-  }
-  .big {
-    color: var(--accent);
+    color: var(--text-2);
+    font-size: 14px;
+    line-height: 1.55;
+    max-width: 56ch;
   }
   .drop .primary {
-    padding: 10px 18px;
-    font-size: 14px;
+    margin-top: 6px;
+    padding: 10px 16px;
   }
   .keys {
-    font-size: 12px;
+    margin: 0;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 240px));
+    gap: 8px 32px;
+    color: var(--text-3);
   }
+  .keys div {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
+  .keys dt {
+    min-width: 64px;
+  }
+  .keys dd {
+    margin: 0;
+  }
+
   .dragmask {
     position: fixed;
     inset: 0;
     display: grid;
     place-items: center;
-    background: rgba(255, 122, 46, 0.12);
-    border: 3px dashed var(--accent);
-    font-size: 18px;
+    background: rgba(245, 197, 24, 0.08);
+    outline: 2px dashed var(--cue);
+    outline-offset: -8px;
+    font-size: 17px;
     pointer-events: none;
     z-index: 40;
   }
@@ -401,26 +421,25 @@
     display: flex;
     gap: 10px;
     align-items: flex-start;
-    padding: 10px 12px;
-    background: #2a1418;
-    border: 1px solid var(--err);
+    padding: 10px 10px 10px 14px;
+    background: #2b1d1c;
+    border-left: 3px solid var(--err);
     border-radius: var(--radius);
-    color: #ffc9cf;
+    color: var(--text);
     white-space: pre-wrap;
     user-select: text;
     z-index: 60;
-    font-size: 12px;
   }
   .toast {
     position: fixed;
     left: 50%;
-    top: 60px;
+    bottom: 20px;
     transform: translateX(-50%);
-    padding: 8px 14px;
-    background: var(--panel-3);
-    border: 1px solid var(--line-2);
-    border-radius: 20px;
+    padding: 9px 14px;
+    background: var(--text);
+    color: var(--bg);
+    font-weight: 500;
+    border-radius: var(--radius);
     z-index: 60;
-    font-size: 12px;
   }
 </style>

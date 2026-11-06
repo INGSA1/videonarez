@@ -15,20 +15,25 @@
   const H = TOP_L + LANE + 6;
   const BODY_H = THUMB + GAP + WAVE;
 
+  // Та же палитра, что и в app.css: графит, мел, жёлтые метки монтажа.
   const C = {
-    bg: "#101116",
-    ruler: "#14151b",
-    tick: "#3a3e4b",
-    tickText: "#7d8293",
-    track: "#191b22",
-    wave: "#5d6478",
-    waveIn: "#aab3cc",
-    accent: "#ff7a2e",
-    seg: "rgba(79,124,255,0.55)",
-    segSel: "#ff7a2e",
-    segText: "#e9eaf0",
+    bg: "#1b1c1e",
+    ruler: "#232427",
+    tick: "#3d4045",
+    tickText: "#7d8086",
+    track: "#202124",
+    wave: "#55585e",
+    waveIn: "#c9c7c2",
+    accent: "#f5c518",
+    marker: "230,228,223",
+    seg: "#4a5a6e",
+    segSel: "#f5c518",
+    segText: "#e6e4df",
+    segTextSel: "#1b1c1e",
     playhead: "#ffffff",
   };
+  const FONT_UI = '11px "Golos Text", "Segoe UI", sans-serif';
+  const FONT_TC = '500 10px "Unbounded", "Golos Text", sans-serif';
 
   let wrap: HTMLDivElement;
   let base: HTMLCanvasElement;
@@ -94,7 +99,7 @@
     for (let t = Math.ceil(vs / minor) * minor; t <= ve; t += minor) {
       ctx.fillRect(Math.round(t2x(t)), RULER - 4, 1, 4);
     }
-    ctx.font = '10px "Cascadia Mono", Consolas, monospace';
+    ctx.font = FONT_TC;
     ctx.textBaseline = "middle";
     for (let t = Math.ceil(vs / stepT) * stepT; t <= ve; t += stepT) {
       const x = Math.round(t2x(t));
@@ -148,9 +153,9 @@
         const x = t2x(mk.time);
         if (x < -6 || x > width + 6) continue;
         const a = 0.35 + 0.65 * mk.score;
-        ctx.fillStyle = `rgba(255,61,110,${a * 0.5})`;
+        ctx.fillStyle = `rgba(${C.marker},${a * 0.35})`;
         ctx.fillRect(x - 0.5, TOP_W, 1.5, WAVE);
-        ctx.fillStyle = `rgba(255,61,110,${a})`;
+        ctx.fillStyle = `rgba(${C.marker},${a})`;
         ctx.beginPath();
         ctx.moveTo(x - 5, TOP_W);
         ctx.lineTo(x + 5, TOP_W);
@@ -159,7 +164,7 @@
       }
     } else {
       ctx.fillStyle = C.tickText;
-      ctx.font = "11px 'Segoe UI', sans-serif";
+      ctx.font = FONT_UI;
       const msg = app.waveLoading ? "Анализ звука…" : m.audioTracks.length ? "" : "Нет звуковой дорожки";
       if (msg) ctx.fillText(msg, 10, TOP_W + WAVE / 2);
     }
@@ -167,7 +172,7 @@
     // Дорожка клипов
     ctx.fillStyle = C.track;
     ctx.fillRect(0, TOP_L, width, LANE);
-    ctx.font = "11px 'Segoe UI', sans-serif";
+    ctx.font = FONT_UI;
     app.segments.forEach((s, i) => {
       const x1 = t2x(s.start);
       const x2 = t2x(s.end);
@@ -183,7 +188,7 @@
         ctx.beginPath();
         ctx.rect(x1, TOP_L, x2 - x1 - 4, LANE);
         ctx.clip();
-        ctx.fillStyle = C.segText;
+        ctx.fillStyle = sel ? C.segTextSel : C.segText;
         ctx.fillText(label, Math.max(x1, 0) + 6, TOP_L + LANE / 2 + 1);
         ctx.restore();
       }
@@ -192,10 +197,10 @@
     // Затемнение вне выделения + рамка с ручками
     const xi = t2x(r.start);
     const xo = t2x(r.end);
-    ctx.fillStyle = "rgba(8,9,12,0.6)";
+    ctx.fillStyle = "rgba(17,18,20,0.62)";
     if (xi > 0) ctx.fillRect(0, TOP_T, Math.min(xi, width), BODY_H);
     if (xo < width) ctx.fillRect(Math.max(0, xo), TOP_T, width - Math.max(0, xo), BODY_H);
-    ctx.fillStyle = "rgba(255,122,46,0.55)";
+    ctx.fillStyle = "rgba(245,197,24,0.6)";
     ctx.fillRect(xi, RULER - 3, xo - xi, 3);
     ctx.strokeStyle = C.accent;
     ctx.lineWidth = 2;
@@ -232,14 +237,14 @@
     }
     if (hoverX >= 0) {
       const label = fmtTime(x2t(hoverX));
-      ctx.font = '10px "Cascadia Mono", Consolas, monospace';
+      ctx.font = FONT_TC;
       const w = ctx.measureText(label).width + 10;
       const lx = clamp(hoverX - w / 2, 0, width - w);
-      ctx.fillStyle = "#2b2f3a";
+      ctx.fillStyle = "#e6e4df";
       ctx.beginPath();
       ctx.roundRect(lx, 2, w, 17, 4);
       ctx.fill();
-      ctx.fillStyle = "#e9eaf0";
+      ctx.fillStyle = "#1b1c1e";
       ctx.textBaseline = "middle";
       ctx.fillText(label, lx + 5, 11);
     }
@@ -392,13 +397,13 @@
 <div class="timeline">
   <div class="bar">
     <div class="legend">
-      <span class="dim">Колесо — масштаб · Shift+колесо — прокрутка · ПКМ — перетаскивание вида · двойной клик по пику — клип</span>
+      <span class="dim">Колесо мыши меняет масштаб, с Shift прокручивает. Двойной щелчок по метке громкости создаёт клип вокруг неё.</span>
     </div>
     <div class="tools">
       {#if app.meta && app.meta.audioTracks.length > 1}
         <select value={app.waveTrack} onchange={(e) => loadWaveform(Number((e.target as HTMLSelectElement).value))} title="Дорожка для волны и пиков">
           {#each app.meta.audioTracks as t (t.index)}
-            <option value={t.index}>Звук {t.index + 1}{t.title ? ` · ${t.title}` : ""}</option>
+            <option value={t.index}>{t.title || `Звук ${t.index + 1}`}</option>
           {/each}
         </select>
       {/if}

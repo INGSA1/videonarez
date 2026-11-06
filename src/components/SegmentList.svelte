@@ -35,15 +35,15 @@
     <div class="empty">
       <p>Клипов пока нет.</p>
       <p class="dim">
-        Отметьте начало <kbd>I</kbd> и конец <kbd>O</kbd>, затем <kbd>Enter</kbd> — фрагмент попадёт в список.
+        Отметьте начало клавишей <kbd>I</kbd>, конец клавишей <kbd>O</kbd> и нажмите <kbd>Enter</kbd>, чтобы добавить фрагмент в список.
         Без списка экспортируется текущее выделение.
       </p>
       {#if app.waveLoading}<p class="dim">Ищу громкие моменты в звуке…</p>{/if}
     </div>
   {:else}
     <div class="summary dim">
-      {app.segments.length} шт. · всего <span class="mono">{fmtTime(total, 1)}</span>
-      {#if app.selectedId !== null}<span class="editing">· ручки таймлайна редактируют выбранный клип</span>{/if}
+      {app.segments.length} в списке, всего <span class="mono">{fmtTime(total, 1)}</span>
+      {#if app.selectedId !== null}<span class="editing">Ручки на шкале двигают выбранный клип.</span>{/if}
     </div>
     <div class="rows">
       {#each app.segments as s, i (s.id)}
@@ -55,7 +55,7 @@
             <input class="name" placeholder="Название клипа" bind:value={s.name} />
             <div class="times">
               <input class="mono" value={fmtTime(s.start)} onchange={(e) => editTime(s, "start", e.currentTarget.value)} />
-              <span class="dim">→</span>
+              <span class="dim">–</span>
               <input class="mono" value={fmtTime(s.end)} onchange={(e) => editTime(s, "end", e.currentTarget.value)} />
               <span class="dur mono">{fmtTime(s.end - s.start, 1)}</span>
             </div>
@@ -88,8 +88,7 @@
     justify-content: center;
   }
   .empty {
-    padding: 18px 6px;
-    text-align: center;
+    padding: 8px 0;
   }
   .empty p {
     margin: 0 0 8px;
@@ -98,7 +97,7 @@
     font-size: 12px;
   }
   .editing {
-    color: #ffb183;
+    color: var(--cue-text);
   }
   .rows {
     display: flex;
@@ -162,7 +161,7 @@
   .dur {
     margin-left: auto;
     font-size: 11px;
-    color: #ffb183;
+    color: var(--cue-text);
   }
   .btns {
     display: flex;

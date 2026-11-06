@@ -15,7 +15,7 @@
   });
 
   const PRIORITIES: { id: Priority; label: string; hint: string }[] = [
-    { id: "idle", label: "Минимальный", hint: "Экспорт идёт только когда CPU простаивает — не мешает играм вообще" },
+    { id: "idle", label: "Минимальный", hint: "Экспорт идёт, только когда процессор простаивает. Играм не мешает совсем" },
     { id: "belowNormal", label: "Ниже среднего", hint: "Рекомендуется: игры и интерфейс всегда в приоритете" },
     { id: "normal", label: "Обычный", hint: "Максимальная скорость экспорта" },
   ];
@@ -69,7 +69,7 @@
 
     {#if s}
       <section>
-        <h4>Нагрузка на систему</h4>
+        <h3 class="h">Нагрузка на систему</h3>
         <div class="opts">
           {#each PRIORITIES as p (p.id)}
             <button class="opt" class:active={s.priority === p.id} onclick={() => (s.priority = p.id)}>
@@ -86,17 +86,17 @@
       </section>
 
       <section>
-        <h4>Папка для клипов</h4>
+        <h3 class="h">Папка для клипов</h3>
         <button class="dir" onclick={pickDir}><Icon name="folder" /> <span class="path">{s.outputDir}</span></button>
       </section>
 
       <section>
         <div class="head">
-          <h4>Кодировщики на этом ПК</h4>
+          <h3 class="h">Кодировщики на этом ПК</h3>
           <button onclick={redetect} disabled={detecting}>{detecting ? "Проверка…" : "Определить заново"}</button>
         </div>
         {#if !s.encoders.length}
-          <p class="dim">Определяются… (первый запуск — несколько секунд)</p>
+          <p class="dim">Проверяю видеокарту, при первом запуске это занимает несколько секунд</p>
         {:else}
           <div class="enc">
             {#each Object.entries(grouped) as [v, list] (v)}
@@ -112,7 +112,7 @@
       </section>
 
       <section>
-        <h4>Кэш предпросмотра</h4>
+        <h3 class="h">Кэш предпросмотра</h3>
         <div class="row">
           <span class="muted">Прокси-копии для форматов, которые WebView2 не играет напрямую (удаляются через 3 дня). Занято: {cacheSize === null ? "…" : fmtBytes(cacheSize)}</span>
           <button onclick={clearCache} disabled={!cacheSize}>Очистить</button>
@@ -120,7 +120,7 @@
       </section>
 
       <section>
-        <h4>Горячие клавиши</h4>
+        <h3 class="h">Горячие клавиши</h3>
         <div class="keys">
           <span><kbd>Пробел</kbd> пуск / пауза</span>
           <span><kbd>←</kbd> <kbd>→</kbd> кадр</span>
@@ -159,7 +159,7 @@
     padding: 18px 20px 20px;
     display: grid;
     gap: 18px;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
   }
   header {
     display: flex;
@@ -173,13 +173,6 @@
   section {
     display: grid;
     gap: 8px;
-  }
-  h4 {
-    margin: 0;
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-3);
   }
   .head {
     display: flex;

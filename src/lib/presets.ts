@@ -31,12 +31,12 @@ export interface Preset {
 
 export const PRESETS: Record<string, Preset> = {
   discord10: {
-    label: "Discord · 10 МБ",
+    label: "Discord, до 10 МБ",
     hint: "H.264, сжатие точно под лимит бесплатного Discord",
     apply: { mode: "encode", codec: "h264", rate: "size", targetMb: 10, height: null, fps: null, audioBitrateKbps: 96, container: "mp4", aspect: "none" },
   },
   discord50: {
-    label: "Discord Nitro · 50 МБ",
+    label: "Discord Nitro, до 50 МБ",
     hint: "H.264 под лимит Nitro Basic",
     apply: { mode: "encode", codec: "h264", rate: "size", targetMb: 50, height: null, fps: null, audioBitrateKbps: 128, container: "mp4", aspect: "none" },
   },
@@ -46,17 +46,17 @@ export const PRESETS: Record<string, Preset> = {
     apply: { mode: "encode", codec: "h264", rate: "quality", quality: 24, height: 1080, fps: null, audioBitrateKbps: 128, container: "mp4", aspect: "none" },
   },
   shorts: {
-    label: "Shorts / TikTok / Reels",
+    label: "Shorts, TikTok, Reels",
     hint: "Вертикаль 9:16, 1080×1920, высокое качество",
     apply: { mode: "encode", codec: "h264", rate: "quality", quality: 20, height: 1920, fps: null, audioBitrateKbps: 192, container: "mp4", aspect: "9:16" },
   },
   youtube: {
-    label: "YouTube / архив",
+    label: "YouTube и архив",
     hint: "Исходное разрешение, высокое качество",
     apply: { mode: "encode", codec: "h264", rate: "quality", quality: 19, height: null, fps: null, audioBitrateKbps: 192, container: "mp4", aspect: "none" },
   },
   hevcSmall: {
-    label: "HEVC · компактно",
+    label: "Компактный HEVC",
     hint: "H.265 — на ~35% меньше при том же качестве",
     apply: { mode: "encode", codec: "hevc", rate: "quality", quality: 25, height: null, fps: null, audioBitrateKbps: 160, container: "mp4", aspect: "none" },
   },

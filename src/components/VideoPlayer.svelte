@@ -3,6 +3,7 @@
   import { cropRect } from "../lib/presets";
   import { fmtTime, clamp } from "../lib/format";
   import Icon from "./Icon.svelte";
+  import Timecode from "./Timecode.svelte";
 
   let video: HTMLVideoElement;
   let stage: HTMLDivElement;
@@ -134,7 +135,7 @@
         onpointerup={cropUp}
         role="presentation"
       >
-        <span class="crop-label mono">{app.opts.aspect} · {crop.src.w}×{crop.src.h}</span>
+        <span class="crop-label">{app.opts.aspect}, {crop.src.w}×{crop.src.h}</span>
         <i class="g1"></i><i class="g2"></i><i class="g3"></i><i class="g4"></i>
       </div>
     {/if}
@@ -142,9 +143,9 @@
     {#if app.proxyPercent >= 0}
       <div class="overlay">
         <div class="ov-box">
-          <div>Готовлю предпросмотр…</div>
+          <div>Готовлю предпросмотр, {app.proxyPercent.toFixed(0)}%</div>
           <div class="bar"><span style="width:{app.proxyPercent}%"></span></div>
-          <div class="dim">Формат не воспроизводится напрямую — создаю лёгкую копию для просмотра. Экспорт всё равно идёт из оригинала.</div>
+          <div class="dim">Этот формат не воспроизводится напрямую, поэтому для просмотра делается облегчённая копия. Экспорт всё равно идёт из оригинала.</div>
         </div>
       </div>
     {/if}
@@ -161,23 +162,23 @@
       <button class="ghost icon" title="Вперёд 5 с (L)" onclick={() => skip(5)}><Icon name="fwd5" /></button>
     </div>
 
-    <div class="time mono">
-      <span class="cur">{fmtTime(app.currentTime)}</span>
-      <span class="dim">/ {fmtTime(app.meta?.duration ?? 0)}</span>
+    <div class="time">
+      <Timecode value={fmtTime(app.currentTime)} size={17} />
+      <span class="total"><Timecode value={fmtTime(app.meta?.duration ?? 0)} size={11} tone="dim" /></span>
     </div>
 
     <div class="grp mid">
-      <button title="Начало клипа (I)" onclick={() => setIn(app.currentTime)}>
-        <Icon name="in" /> <span class="mono">{fmtTime(range.start)}</span>
+      <button class="mark" title="Поставить начало клипа (I)" onclick={() => setIn(app.currentTime)}>
+        <Icon name="in" /> <Timecode value={fmtTime(range.start)} size={11} />
       </button>
-      <button title="Конец клипа (O)" onclick={() => setOut(app.currentTime)}>
-        <Icon name="out" /> <span class="mono">{fmtTime(range.end)}</span>
+      <button class="mark" title="Поставить конец клипа (O)" onclick={() => setOut(app.currentTime)}>
+        <Icon name="out" /> <Timecode value={fmtTime(range.end)} size={11} />
       </button>
-      <span class="len mono" title="Длительность выделения">{fmtTime(range.end - range.start, 1)}</span>
+      <span class="len" title="Длительность выделения"><Timecode value={fmtTime(range.end - range.start, 1)} size={11} tone="cue" /></span>
       <button class="ghost icon" title="Проиграть выделенное (P)" onclick={playRange}><Icon name="loop" /></button>
       {#if app.selectedId === null}
-        <button class="add" title="Добавить выделение в список клипов (Enter)" onclick={() => addSegment()}>
-          <Icon name="plus" /> Клип
+        <button title="Добавить выделение в список клипов (Enter)" onclick={() => addSegment()}>
+          <Icon name="plus" /> В список
         </button>
       {/if}
     </div>
@@ -223,9 +224,8 @@
   }
   .crop {
     position: absolute;
-    border: 2px solid var(--accent);
+    border: 2px solid var(--cue);
     cursor: move;
-    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
     touch-action: none;
   }
   .crop i {
@@ -241,11 +241,12 @@
     position: absolute;
     top: 6px;
     left: 6px;
-    font-size: 11px;
+    font-size: 12px;
+    font-weight: 600;
     padding: 2px 6px;
-    border-radius: 4px;
-    background: rgba(0, 0, 0, 0.7);
-    color: #ffb183;
+    border-radius: 3px;
+    background: var(--cue);
+    color: var(--cue-ink);
   }
   .overlay {
     position: absolute;
@@ -261,25 +262,23 @@
     text-align: center;
   }
   .bar {
-    height: 4px;
+    height: 3px;
     background: var(--panel-3);
-    border-radius: 4px;
     overflow: hidden;
   }
   .bar span {
     display: block;
     height: 100%;
-    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    background: var(--text);
     transition: width 0.2s;
   }
   .controls {
     display: flex;
     align-items: center;
-    gap: 14px;
-    padding: 8px 12px;
+    gap: 16px;
+    padding: 8px 14px;
     background: var(--panel);
     border-top: 1px solid var(--line);
-    border-bottom: 1px solid var(--line);
   }
   .grp {
     display: flex;
@@ -294,33 +293,29 @@
     margin-left: auto;
   }
   .play {
-    width: 36px;
-    height: 36px;
+    width: 34px;
+    height: 34px;
     border-radius: 50%;
     justify-content: center;
     padding: 0;
     background: var(--text);
-    color: #111;
-    border: none;
+    color: var(--bg);
   }
   .play:hover:not(:disabled) {
     background: #fff;
   }
   .time {
-    font-size: 14px;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
   }
-  .time .cur {
-    color: var(--text);
+  /* Метки In/Out — жёлтые, это точки монтажа. */
+  .mark {
+    background: var(--bg);
+    box-shadow: inset 2px 0 0 var(--cue);
   }
   .len {
-    color: #ffb183;
-    background: var(--accent-soft);
-    padding: 4px 8px;
-    border-radius: 6px;
-  }
-  .add {
-    border-color: var(--accent);
-    color: #ffb183;
+    padding: 6px 4px;
   }
   .vol {
     width: 80px;
