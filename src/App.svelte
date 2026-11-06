@@ -2,7 +2,7 @@
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import {
     app, init, openFileDialog, openPath, togglePlay, step, skip, setIn, setOut, addSegment,
-    removeSegment, playRange, startExport, scheduleSave, player, VIDEO_EXT,
+    removeSegment, playRange, startExport, scheduleSave, player, VIDEO_EXT, installUpdate,
   } from "./lib/store.svelte";
   import { fmtBytes, codecLabel, fmtTime } from "./lib/format";
   import VideoPlayer from "./components/VideoPlayer.svelte";
@@ -124,6 +124,18 @@
     {/if}
     <button class="ghost icon" title="Настройки" onclick={() => (app.showSettings = true)}><Icon name="gear" size={17} /></button>
   </header>
+
+  {#if app.update.info && !app.update.dismissed}
+    <div class="update" role="status">
+      {#if app.update.installing}
+        <span>Скачиваю версию {app.update.info.version}{app.update.total ? `, ${Math.round((app.update.downloaded / app.update.total) * 100)}%` : ""}. Приложение перезапустится само.</span>
+      {:else}
+        <span>Вышла версия {app.update.info.version}. Установка займёт меньше минуты, клипы и настройки сохранятся.</span>
+        <button class="primary" onclick={installUpdate}>Обновить и перезапустить</button>
+        <button class="ghost" onclick={() => (app.update.dismissed = true)}>Позже</button>
+      {/if}
+    </div>
+  {/if}
 
   <main>
     {#if app.mode === "capture"}
@@ -282,6 +294,17 @@
     flex: 1;
     min-height: 0;
     display: flex;
+  }
+  .update {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 18px;
+    background: var(--panel-2);
+    border-bottom: 1px solid var(--line);
+  }
+  .update span {
+    flex: 1;
   }
   .editor {
     flex: 1;

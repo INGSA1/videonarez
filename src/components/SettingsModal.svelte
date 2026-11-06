@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { open } from "@tauri-apps/plugin-dialog";
-  import { app, saveSettings, toast } from "../lib/store.svelte";
+  import { app, saveSettings, toast, checkUpdates, installUpdate } from "../lib/store.svelte";
   import { fmtBytes } from "../lib/format";
   import Icon from "./Icon.svelte";
   import type { EncoderInfo, Priority } from "../lib/types";
@@ -83,6 +83,25 @@
           <input type="number" min="0" max="64" bind:value={s.cpuThreads} />
         </label>
         <p class="dim small">GPU-кодировщики почти не нагружают процессор; лимит потоков влияет только на x264/x265 и точную обрезку.</p>
+      </section>
+
+      <section>
+        <h3 class="h">Версия и обновления</h3>
+        <div class="row">
+          <span class="muted">
+            Установлена версия {app.version || "…"}.
+            {#if app.update.info}Доступна {app.update.info.version}.{:else if app.update.message}{app.update.message}.{:else}Приложение проверяет обновления само раз в несколько часов.{/if}
+          </span>
+          {#if app.update.info}
+            <button class="primary" onclick={installUpdate} disabled={app.update.installing}>
+              {app.update.installing ? "Устанавливаю" : "Обновить"}
+            </button>
+          {:else}
+            <button onclick={() => checkUpdates(true)} disabled={app.update.checking}>
+              {app.update.checking ? "Проверяю" : "Проверить сейчас"}
+            </button>
+          {/if}
+        </div>
       </section>
 
       <section>

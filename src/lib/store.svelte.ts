@@ -60,6 +60,17 @@ export const app = $state({
   showSettings: false,
   dragOver: false,
 
+  version: "",
+  update: {
+    info: null as { version: string; current: string; notes?: string | null; date?: string | null } | null,
+    checking: false,
+    installing: false,
+    downloaded: 0,
+    total: 0,
+    message: "",
+    dismissed: false,
+  },
+
   mode: "editor" as "editor" | "capture",
   cap: {
     status: null as CaptureStatus | null,
@@ -111,6 +122,16 @@ export async function init() {
     app.error = e.payload;
   });
   await listen<Job[]>("queue-update", (e) => onQueue(e.payload));
+  await listen<NonNullable<typeof app.update.info>>("update-available", (e) => {
+    app.update.info = e.payload;
+  });
+  await listen<{ downloaded: number; total: number | null }>("update-progress", (e) => {
+    app.update.downloaded = e.payload.downloaded;
+    app.update.total = e.payload.total ?? 0;
+  });
+  invoke<string>("app_version").then((v) => (app.version = v)).catch(() => {});
+  // Тихая проверка при открытии окна: ошибки сети здесь не показываем.
+  void checkUpdates(false);
   invoke<Job[]>("queue_list").then(onQueue).catch(() => {});
   // История клипов хранится в ядре — переживает закрытие окна в трей.
   invoke<ClipSaved[]>("capture_recent").then((r) => (app.cap.recent = r)).catch(() => {});
@@ -501,6 +522,36 @@ export function cancelExport(id?: number) {
 
 export function clearQueue() {
   void invoke("queue_clear");
+}
+
+// ---------- Обновления ----------
+
+export async function checkUpdates(manual: boolean) {
+  app.update.checking = true;
+  app.update.message = "";
+  try {
+    const info = await invoke<typeof app.update.info>("check_update");
+    app.update.info = info;
+    if (!info && manual) app.update.message = "Установлена последняя версия";
+  } catch (e) {
+    if (manual) app.update.message = String(e);
+  } finally {
+    app.update.checking = false;
+  }
+}
+
+export async function installUpdate() {
+  app.update.installing = true;
+  app.update.downloaded = 0;
+  try {
+    // После установки приложение перезапустится само; возврат сюда бывает только в режиме проверки.
+    const bytes = await invoke<number>("install_update", { dryRun: false });
+    app.update.installing = false;
+    toast(`Обновление скачано и подпись проверена, ${(bytes / 1048576).toFixed(1)} МБ. Установка пропущена (режим проверки).`);
+  } catch (e) {
+    app.update.installing = false;
+    app.error = String(e);
+  }
 }
 
 export async function setAutostart(enabled: boolean) {

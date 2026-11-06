@@ -8,6 +8,7 @@ mod error;
 mod ffmpeg;
 mod shell;
 mod state;
+mod updates;
 
 use error::AppResult;
 use state::AppState;
@@ -70,6 +71,11 @@ fn set_autostart(app: tauri::AppHandle, enabled: bool) -> AppResult<bool> {
     Ok(al.is_enabled().unwrap_or(enabled))
 }
 
+#[tauri::command]
+fn app_version(app: tauri::AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
 /// Запуск с `--tray` (автозапуск Windows): окно и WebView2 не создаются вовсе.
 fn started_in_tray() -> bool {
     std::env::args().any(|a| a == "--tray")
@@ -83,6 +89,8 @@ fn main() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(updates::Pending::default())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--tray"]),
@@ -103,6 +111,7 @@ fn main() {
             }
             capture::recorder::spawn_monitor(app.handle().clone());
             capture::games::spawn_watcher(app.handle().clone());
+            updates::spawn_background_check(app.handle().clone());
             if let Some(w) = app.get_webview_window("main") {
                 if started_in_tray() {
                     let _ = w.destroy();
@@ -155,6 +164,9 @@ fn main() {
             editor::queue::queue_clear,
             get_autostart,
             set_autostart,
+            updates::check_update,
+            updates::install_update,
+            app_version,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Videonarez");
