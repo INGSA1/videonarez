@@ -97,16 +97,24 @@ pub async fn clip_preview(app: AppHandle, path: String) -> AppResult<ClipPreview
     let cache = cache_path(&app, &src)?;
     if !cache.is_file() {
         // Кадр примерно с трети клипа — обычно уже «самое интересное», но не самый конец.
+        // Если после этой точки нет ключевых кадров (бывает у записей с редкими IDR),
+        // берётся первый ключевой кадр файла.
         let at = if dur > 0.0 { (dur * 0.33).min(dur - 0.1).max(0.0) } else { 0.0 };
-        let mut cmd = ffmpeg_cmd(Priority::BelowNormal, false)?;
-        cmd.args(["-noaccurate_seek", "-skip_frame", "nokey", "-ss", &ts(at), "-i", &path]);
-        cmd.args([
-            "-map", "0:v:0", "-an", "-frames:v", "1",
-            "-vf", "scale=320:-2:flags=bicubic,format=yuvj420p",
-            "-q:v", "4", "-f", "image2",
-        ]);
-        cmd.arg(&cache);
-        if output(cmd, None).await.is_err() {
+        for seek in [at, 0.0] {
+            let mut cmd = ffmpeg_cmd(Priority::BelowNormal, false)?;
+            cmd.args(["-noaccurate_seek", "-skip_frame", "nokey", "-ss", &ts(seek), "-i", &path]);
+            cmd.args([
+                "-map", "0:v:0", "-an", "-frames:v", "1",
+                "-vf", "scale=320:-2:flags=bicubic,format=yuvj420p",
+                "-q:v", "4", "-f", "image2",
+            ]);
+            cmd.arg(&cache);
+            let _ = output(cmd, None).await;
+            if cache.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+                break;
+            }
+        }
+        if !cache.is_file() {
             return Ok(ClipPreview { thumb: None, duration: dur });
         }
     }
