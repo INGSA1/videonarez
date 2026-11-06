@@ -167,10 +167,10 @@ export async function openFileDialog() {
 }
 
 export async function openPath(path: string) {
-  if (app.exporting) {
-    toast("Дождитесь окончания экспорта");
-    return;
-  }
+  // Экспорт может идти в очереди — новый файл открывается сразу; результат прошлого
+  // задания останется во вкладке «Очередь».
+  app.currentJob = null;
+  app.exporting = false;
   const el = player.el;
   el?.pause();
   app.loading = true;
@@ -421,7 +421,7 @@ export function exportSegments() {
 export async function startExport() {
   const m = app.meta;
   const st = app.settings;
-  if (!m || !st || app.exporting) return;
+  if (!m || !st) return; // идущий экспорт не мешает: новое задание встаёт в очередь
   const o = app.opts;
   const crop = o.mode === "encode" ? cropRect(m.displayWidth, m.displayHeight, o.aspect, o.cropX, o.cropY) : null;
   const segments = exportSegments();

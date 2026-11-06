@@ -43,18 +43,21 @@ pub struct Session {
     pub prefix: String,
     pub tracks: Vec<String>,
     pub ffmpeg_pid: u32,
+    stop_wait: Duration,
 }
 
 /// Мягкая остановка: «q» → FFmpeg сам корректно закрывает захват и аппаратный энкодер.
-/// Резкое убийство процесса посреди захвата на уровне драйвера опасно для видеодрайвера,
-/// поэтому kill — только если за 3 секунды процесс не завершился сам.
-fn graceful_stop(child: &mut Child) {
+/// Резкое убийство процесса посреди захвата на уровне драйвера (vsrc_amf, ddagrab) опасно
+/// для видеодрайвера, поэтому kill — только если процесс не завершился сам за `wait`.
+/// (Замерено: vsrc_amf и ddagrab выходят по «q» за ~150 мс; gfxcapture на «q» не реагирует,
+/// но это обычная пользовательская сессия WGC, и её завершение безопасно.)
+fn graceful_stop(child: &mut Child, wait: Duration) {
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
         let _ = stdin.write_all(b"q");
         let _ = stdin.flush();
     }
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + wait;
     while Instant::now() < deadline {
         if let Ok(Some(_)) = child.try_wait() {
             return;
@@ -65,9 +68,17 @@ fn graceful_stop(child: &mut Child) {
     let _ = child.wait();
 }
 
+fn stop_wait(graph: &str) -> Duration {
+    if graph.starts_with("gfxcapture") {
+        Duration::from_millis(300)
+    } else {
+        Duration::from_secs(3)
+    }
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
-        graceful_stop(&mut self.child);
+        graceful_stop(&mut self.child, self.stop_wait);
         if let Some(h) = self.reader.take() {
             let _ = h.join();
         }
@@ -351,7 +362,7 @@ fn try_start(
             return Err(if err.is_empty() { format!("FFmpeg завершился ({status})") } else { last_line(&err) });
         }
         if Instant::now() > deadline {
-            graceful_stop(&mut child);
+            graceful_stop(&mut child, stop_wait(&cand.graph));
             let _ = reader.join();
             return Err("нет кадров за 8 секунд".into());
         }
@@ -373,6 +384,7 @@ fn try_start(
         source: target.label(),
         prefix: target.file_prefix(),
         tracks: audio.iter().map(|(_, n)| n.clone()).collect(),
+        stop_wait: stop_wait(&cand.graph),
     })
 }
 
