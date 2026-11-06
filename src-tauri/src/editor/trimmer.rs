@@ -72,6 +72,9 @@ pub struct EncodeSettings {
     pub bitrate_kbps: u32,
     pub target_mb: f64,
     pub audio_tracks: Vec<AudioTrackSel>,
+    /// Свести включённые дорожки в одну (иначе каждая остаётся отдельной дорожкой в файле).
+    #[serde(default = "yes")]
+    pub mixdown: bool,
     pub audio_bitrate_kbps: u32,
     pub mute: bool,
 }
@@ -105,6 +108,10 @@ pub struct ExportResult {
     pub files: Vec<String>,
     pub notes: Vec<String>,
     pub elapsed_sec: f64,
+}
+
+fn yes() -> bool {
+    true
 }
 
 // ---------- Контекст выполнения ----------
@@ -366,7 +373,9 @@ async fn export_segment(ctx: &mut Ctx<'_>, seg: &Segment, out: &Path, size_dur: 
 async fn copy_segment(ctx: &mut Ctx<'_>, start: f64, end: f64, out: &Path, stage: &str) -> AppResult<()> {
     let mut cmd = ffmpeg_cmd(Priority::BelowNormal, true)?;
     cmd.args(["-ss", &ts(start), "-to", &ts(end), "-i", &ctx.req.input]);
-    cmd.args(["-map", "0:v:0?", "-map", "0:a?", "-sn", "-dn", "-c", "copy"]);
+    cmd.args(["-map", "0:v:0?"]);
+    cmd.args(copy_audio_maps(&ctx.meta, &ctx.req.encode));
+    cmd.args(["-sn", "-dn", "-c", "copy"]);
     if ctx.ext() == "mp4" && ctx.meta.audio_tracks.iter().any(|a| !mp4_audio_ok(&a.codec)) {
         cmd.args(["-c:a", "aac", "-b:a", "192k"]);
         ctx.note("Звук в формате, не поддерживаемом MP4, перекодирован в AAC");
@@ -439,7 +448,9 @@ async fn smart_segment(ctx: &mut Ctx<'_>, seg: &Segment, out: &Path) -> AppResul
         // Голова: [In, K) — перекодирование с параметрами, совпадающими с исходником.
         let mut cmd = ffmpeg_cmd(Priority::BelowNormal, true)?;
         cmd.args(["-ss", &ts(seg.start), "-to", &ts(k - 0.0005), "-i", &ctx.req.input]);
-        cmd.args(["-map", "0:v:0", "-map", "0:a?", "-sn", "-dn"]);
+        cmd.args(["-map", "0:v:0"]);
+        cmd.args(copy_audio_maps(&ctx.meta, &ctx.req.encode));
+        cmd.args(["-sn", "-dn"]);
         let threads = ctx.settings.cpu_threads;
         if ctx.meta.video_codec == "h264" {
             let profile = match ctx.meta.profile.as_deref().unwrap_or("") {
@@ -465,7 +476,9 @@ async fn smart_segment(ctx: &mut Ctx<'_>, seg: &Segment, out: &Path) -> AppResul
         // Хвост: [K, Out] — копирование без потерь.
         let mut cmd = ffmpeg_cmd(Priority::BelowNormal, true)?;
         cmd.args(["-ss", &ts(k + 0.0005), "-to", &ts(seg.end), "-i", &ctx.req.input]);
-        cmd.args(["-map", "0:v:0", "-map", "0:a?", "-sn", "-dn", "-c", "copy", "-f", "mpegts"]).arg(&tailp);
+        cmd.args(["-map", "0:v:0"]);
+        cmd.args(copy_audio_maps(&ctx.meta, &ctx.req.encode));
+        cmd.args(["-sn", "-dn", "-c", "copy", "-f", "mpegts"]).arg(&tailp);
         ctx.run(cmd, "Копирование", seg.end - seg.start, k - seg.start).await?;
 
         concat(ctx, &[head.clone(), tailp.clone()], out, true).await
@@ -482,7 +495,9 @@ async fn precise_full(ctx: &mut Ctx<'_>, seg: &Segment, out: &Path) -> AppResult
         .ok_or_else(|| AppError::msg("Нет кодировщика H.264"))?;
     let mut cmd = ffmpeg_cmd(ctx.settings.priority, true)?;
     cmd.args(["-ss", &ts(seg.start), "-to", &ts(seg.end), "-i", &ctx.req.input]);
-    cmd.args(["-map", "0:v:0", "-map", "0:a?", "-sn", "-dn"]);
+    cmd.args(["-map", "0:v:0"]);
+        cmd.args(copy_audio_maps(&ctx.meta, &ctx.req.encode));
+        cmd.args(["-sn", "-dn"]);
     cmd.args(["-vf", &format!("format={}", pix_fmt(&enc))]);
     cmd.args(video_args(&enc, &Rate::Quality(18), ctx.settings.cpu_threads));
     cmd.args(["-c:a", "aac", "-b:a", "192k"]);
@@ -519,33 +534,62 @@ async fn concat(ctx: &mut Ctx<'_>, parts: &[PathBuf], out: &Path, from_ts: bool)
 
 // ---------- 3. Перекодирование (GPU) ----------
 
-fn audio_graph(meta: &VideoMeta, s: &EncodeSettings) -> Option<String> {
+/// Включённые дорожки с громкостью: (индекс, громкость, название).
+fn selected_tracks(meta: &VideoMeta, s: &EncodeSettings) -> Vec<(usize, f32, Option<String>)> {
     if s.mute || meta.audio_tracks.is_empty() {
-        return None;
+        return Vec::new();
     }
-    let mut sel: Vec<(usize, f32)> = s
-        .audio_tracks
+    let title = |i: usize| meta.audio_tracks.get(i).and_then(|t| t.title.clone());
+    if s.audio_tracks.is_empty() {
+        return meta.audio_tracks.iter().map(|t| (t.index, 1.0, t.title.clone())).collect();
+    }
+    s.audio_tracks
         .iter()
         .filter(|t| t.enabled && t.index < meta.audio_tracks.len())
-        .map(|t| (t.index, t.volume.clamp(0.0, 4.0)))
-        .collect();
-    if s.audio_tracks.is_empty() {
-        sel = meta.audio_tracks.iter().map(|t| (t.index, 1.0)).collect();
+        .map(|t| (t.index, t.volume.clamp(0.0, 4.0), title(t.index)))
+        .collect()
+}
+
+/// Для режимов без перекодирования: какие дорожки скопировать (громкость тут не применяется).
+fn copy_audio_maps(meta: &VideoMeta, s: &EncodeSettings) -> Vec<String> {
+    if s.audio_tracks.is_empty() && !s.mute {
+        return vec!["-map".into(), "0:a?".into()];
     }
-    match sel.len() {
-        0 => None,
-        1 => Some(format!("[0:a:{}]volume={:.3}[a]", sel[0].0, sel[0].1)),
-        n => {
-            let mut g: Vec<String> = sel
-                .iter()
-                .enumerate()
-                .map(|(k, (i, v))| format!("[0:a:{i}]volume={v:.3}[a{k}]"))
-                .collect();
-            let ins: String = (0..n).map(|k| format!("[a{k}]")).collect();
-            g.push(format!("{ins}amix=inputs={n}:normalize=0:dropout_transition=0[a]"));
-            Some(g.join(";"))
+    selected_tracks(meta, s)
+        .iter()
+        .flat_map(|(i, _, _)| ["-map".to_string(), format!("0:a:{i}")])
+        .collect()
+}
+
+/// Граф звука для перекодирования. Возвращает граф и выходные метки:
+/// при сведении — одна метка [a], иначе по метке на каждую дорожку (с её громкостью и названием).
+fn audio_graph(meta: &VideoMeta, s: &EncodeSettings) -> Option<(String, Vec<(String, Option<String>)>)> {
+    let sel = selected_tracks(meta, s);
+    if sel.is_empty() {
+        return None;
+    }
+    if sel.len() == 1 || s.mixdown {
+        if sel.len() == 1 {
+            let (i, v, _) = &sel[0];
+            return Some((format!("[0:a:{i}]volume={v:.3}[a]"), vec![("[a]".into(), None)]));
         }
+        let n = sel.len();
+        let mut g: Vec<String> = sel
+            .iter()
+            .enumerate()
+            .map(|(k, (i, v, _))| format!("[0:a:{i}]volume={v:.3}[a{k}]"))
+            .collect();
+        let ins: String = (0..n).map(|k| format!("[a{k}]")).collect();
+        g.push(format!("{ins}amix=inputs={n}:normalize=0:dropout_transition=0[a]"));
+        return Some((g.join(";"), vec![("[a]".into(), None)]));
     }
+    let g: Vec<String> = sel
+        .iter()
+        .enumerate()
+        .map(|(k, (i, v, _))| format!("[0:a:{i}]volume={v:.3}[t{k}]"))
+        .collect();
+    let labels = sel.iter().enumerate().map(|(k, (_, _, t))| (format!("[t{k}]"), t.clone())).collect();
+    Some((g.join(";"), labels))
 }
 
 async fn encode_segment(ctx: &mut Ctx<'_>, seg: &Segment, out: &Path, size_dur: f64, factor: f64) -> AppResult<()> {
@@ -557,6 +601,8 @@ async fn encode_segment(ctx: &mut Ctx<'_>, seg: &Segment, out: &Path, size_dur: 
     let dur = seg.end - seg.start;
     let audio = audio_graph(&m, &s);
     let audio_kbps = if audio.is_some() { s.audio_bitrate_kbps.clamp(32, 512) } else { 0 };
+    // Для расчёта под размер файла учитываем все звуковые потоки (при раздельных дорожках их несколько).
+    let audio_total_kbps = audio_kbps * audio.as_ref().map_or(0, |(_, l)| l.len() as u32);
 
     // Режим битрейта
     let mut height = s.height.filter(|h| *h > 0);
@@ -569,7 +615,7 @@ async fn encode_segment(ctx: &mut Ctx<'_>, seg: &Segment, out: &Path, size_dur: 
         RateKind::Size => {
             // Bitrate = (MB * 8192 / сек) − звук, запас 3% на контейнер.
             let total = s.target_mb * 8192.0 / size_dur.max(0.1) * 0.97;
-            let v = ((total - audio_kbps as f64) * factor).floor();
+            let v = ((total - audio_total_kbps as f64) * factor).floor();
             if v < 120.0 {
                 return Err(AppError::msg(format!(
                     "Слишком маленький размер ({} МБ) для {:.0} с видео — увеличьте лимит или укоротите клип",
@@ -625,7 +671,7 @@ async fn encode_segment(ctx: &mut Ctx<'_>, seg: &Segment, out: &Path, size_dur: 
         }
         vf.push(format!("format={}", pix_fmt(&enc)));
         let mut graph = format!("[0:v:0]{}[v]", vf.join(","));
-        if let Some(a) = &audio {
+        if let Some((a, _)) = &audio {
             graph.push(';');
             graph.push_str(a);
         }
@@ -636,10 +682,21 @@ async fn encode_segment(ctx: &mut Ctx<'_>, seg: &Segment, out: &Path, size_dur: 
         }
         cmd.args(["-ss", &ts(seg.start), "-to", &ts(seg.end), "-i", &ctx.req.input]);
         cmd.args(["-filter_complex", &graph, "-map", "[v]"]);
-        if audio.is_some() {
-            cmd.args(["-map", "[a]", "-c:a", "aac", "-b:a", &format!("{audio_kbps}k")]);
-        } else {
-            cmd.arg("-an");
+        match &audio {
+            Some((_, labels)) => {
+                for (k, (label, title)) in labels.iter().enumerate() {
+                    cmd.args(["-map", label]);
+                    // Названия дорожек сохраняются (Игра, Discord, Микрофон…).
+                    if let Some(t) = title {
+                        cmd.arg(format!("-metadata:s:a:{k}")).arg(format!("title={t}"));
+                        cmd.arg(format!("-metadata:s:a:{k}")).arg(format!("handler_name={t}"));
+                    }
+                }
+                cmd.args(["-c:a", "aac", "-b:a", &format!("{audio_kbps}k")]);
+            }
+            None => {
+                cmd.arg("-an");
+            }
         }
         cmd.args(video_args(&enc, &rate, ctx.settings.cpu_threads));
         cmd.args(["-g", &((out_fps * 2.0).round() as u32).to_string()]);

@@ -29,6 +29,38 @@ pub enum AudioSource {
     Process(u32),
     /// Микрофон: ID устройства или устройство по умолчанию.
     Mic(Option<String>),
+    /// Приложение по имени exe (Discord, браузер…). Процесс может запуститься позже или
+    /// перезапуститься — дорожка ждёт его тишиной и подхватывает заново.
+    App(String),
+}
+
+/// Корневой процесс приложения по имени exe (родитель которого — не то же приложение),
+/// чтобы Process Loopback с include_tree захватил все его дочерние процессы.
+pub fn find_app_pid(exe: &str) -> Option<u32> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    };
+    let mut procs: Vec<(u32, u32)> = Vec::new(); // (pid, parent)
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
+        let mut e = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut ok = Process32FirstW(snap, &mut e).is_ok();
+        while ok {
+            let n = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+            if String::from_utf16_lossy(&e.szExeFile[..n]).eq_ignore_ascii_case(exe) {
+                procs.push((e.th32ProcessID, e.th32ParentProcessID));
+            }
+            ok = Process32NextW(snap, &mut e).is_ok();
+        }
+        let _ = CloseHandle(snap);
+    }
+    let pids: Vec<u32> = procs.iter().map(|p| p.0).collect();
+    procs
+        .iter()
+        .find(|(_, parent)| !pids.contains(parent))
+        .or(procs.first())
+        .map(|p| p.0)
 }
 
 pub struct AudioFeed {
@@ -53,7 +85,33 @@ impl AudioFeed {
                 let Some(mut stream) = accept(&listener, &stop2) else { return };
                 let _ = stream.set_nodelay(true);
                 let mut clock = Clock::new(t0, offset_secs);
-                if let Err(e) = capture(&source, &mut stream, &stop2, &mut clock) {
+                if let AudioSource::App(exe) = &source {
+                    // Приложение: ждём процесс, пишем его звук, после закрытия снова ждём.
+                    while !stop2.load(Ordering::Relaxed) {
+                        match find_app_pid(exe) {
+                            Some(pid) => {
+                                if let Err(e) = capture(&AudioSource::Process(pid), &mut stream, &stop2, &mut clock, Some(pid)) {
+                                    if is_closed(&e) {
+                                        return;
+                                    }
+                                    *error2.lock().unwrap() = Some(e.to_string());
+                                }
+                            }
+                            None => {
+                                // Нет процесса — 2 секунды тишины и снова ищем.
+                                let until = Instant::now() + Duration::from_secs(2);
+                                while Instant::now() < until && !stop2.load(Ordering::Relaxed) {
+                                    std::thread::sleep(Duration::from_millis(20));
+                                    if clock.pad(&mut stream, &mut VecDeque::new()).is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
+                if let Err(e) = capture(&source, &mut stream, &stop2, &mut clock, None) {
                     if !stop2.load(Ordering::Relaxed) {
                         *error2.lock().unwrap() = Some(e.to_string());
                     }
@@ -133,11 +191,24 @@ impl Clock {
     }
 }
 
+/// FFmpeg закрыл соединение (захват остановлен) — это не ошибка устройства.
+fn is_closed(e: &Box<dyn std::error::Error>) -> bool {
+    e.downcast_ref::<std::io::Error>().map_or(false, |io| {
+        matches!(
+            io.kind(),
+            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+        )
+    })
+}
+
+/// `watch_pid` — для звука процесса: выйти (Ok), когда процесс завершится, чтобы
+/// вызывающий код переключился на тишину и дождался нового запуска приложения.
 fn capture(
     source: &AudioSource,
     out: &mut TcpStream,
     stop: &AtomicBool,
     clock: &mut Clock,
+    watch_pid: Option<u32>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     initialize_mta().ok()?;
     let fmt = WaveFormat::new(32, 32, &SampleType::Float, RATE as usize, CH, None);
@@ -155,6 +226,7 @@ fn capture(
             }
             .get_iaudioclient()?
         }
+        AudioSource::App(_) => return Err("источник приложения обрабатывается выше".into()),
     };
     let buffer_hns = match source {
         AudioSource::Process(_) => 0,
@@ -170,7 +242,17 @@ fn capture(
     client.start_stream()?;
 
     let mut q: VecDeque<u8> = VecDeque::with_capacity(RATE as usize * BYTES_PER_FRAME / 10);
+    let mut last_check = Instant::now();
     while !stop.load(Ordering::Relaxed) {
+        if let Some(pid) = watch_pid {
+            if last_check.elapsed() > Duration::from_secs(1) {
+                last_check = Instant::now();
+                if !crate::capture::games::alive(pid) {
+                    let _ = client.stop_stream();
+                    return Ok(());
+                }
+            }
+        }
         let _ = event.wait_for_event(20); // таймаут = тишина, это нормально
         while let Some(n) = cap.get_next_packet_size()? {
             if n == 0 {
@@ -188,6 +270,91 @@ fn capture(
     }
     let _ = client.stop_stream();
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioApp {
+    pub exe: String,
+    pub name: String,
+    /// Прямо сейчас воспроизводит звук.
+    pub playing: bool,
+    /// Есть звуковая сессия (приложение уже выводило звук).
+    pub has_session: bool,
+}
+
+/// Понятное имя дорожки по exe.
+pub fn app_display_name(exe: &str) -> String {
+    let stem = exe.trim_end_matches(".exe").trim_end_matches(".EXE");
+    let known = match stem.to_lowercase().as_str() {
+        "discord" | "discordptb" | "discordcanary" => Some("Discord"),
+        "chrome" => Some("Chrome"),
+        "msedge" => Some("Edge"),
+        "firefox" => Some("Firefox"),
+        "opera" => Some("Opera"),
+        "browser" => Some("Яндекс Браузер"),
+        "telegram" => Some("Telegram"),
+        "spotify" => Some("Spotify"),
+        "steam" | "steamwebhelper" => Some("Steam"),
+        "ts3client_win64" | "teamspeak" => Some("TeamSpeak"),
+        "yandexmusic" | "яндекс музыка" => Some("Яндекс Музыка"),
+        "vlc" => Some("VLC"),
+        _ => None,
+    };
+    match known {
+        Some(k) => k.to_string(),
+        None => {
+            let mut c = stem.chars();
+            c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+        }
+    }
+}
+
+/// Приложения, которые выводят звук (сессии микшера Windows), плюс программы с открытыми окнами.
+pub fn list_audio_apps() -> Vec<AudioApp> {
+    use std::collections::BTreeMap;
+    let mut map: BTreeMap<String, AudioApp> = BTreeMap::new();
+    let own = std::process::id();
+    let run = |map: &mut BTreeMap<String, AudioApp>| -> Result<(), Box<dyn std::error::Error>> {
+        let _ = initialize_mta();
+        let dev = DeviceEnumerator::new()?.get_default_device(&Direction::Render)?;
+        let en = dev.get_iaudiosessionmanager()?.get_audiosessionenumerator()?;
+        for i in 0..en.get_count()? {
+            let Ok(s) = en.get_session(i) else { continue };
+            let pid = s.get_process_id().unwrap_or(0);
+            if pid == 0 || pid == own {
+                continue; // системные звуки Windows
+            }
+            let exe = crate::capture::sources::process_exe(pid);
+            if exe.is_empty() {
+                continue;
+            }
+            let playing = matches!(s.get_state(), Ok(wasapi::SessionState::Active));
+            let e = map.entry(exe.to_lowercase()).or_insert_with(|| AudioApp {
+                name: app_display_name(&exe),
+                exe: exe.clone(),
+                playing: false,
+                has_session: true,
+            });
+            e.playing |= playing;
+        }
+        Ok(())
+    };
+    let _ = run(&mut map);
+    for w in crate::capture::sources::windows() {
+        if w.exe.is_empty() || w.exe.eq_ignore_ascii_case("explorer.exe") {
+            continue;
+        }
+        map.entry(w.exe.to_lowercase()).or_insert_with(|| AudioApp {
+            name: app_display_name(&w.exe),
+            exe: w.exe.clone(),
+            playing: false,
+            has_session: false,
+        });
+    }
+    let mut v: Vec<AudioApp> = map.into_values().collect();
+    v.sort_by(|a, b| (!a.playing, !a.has_session, a.name.to_lowercase()).cmp(&(!b.playing, !b.has_session, b.name.to_lowercase())));
+    v
 }
 
 #[derive(Debug, Clone, Serialize)]

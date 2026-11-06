@@ -192,26 +192,44 @@
       {/if}
     </section>
 
-    {#if m && m.audioTracks.length}
-      <section>
-        <h3 class="h">Звук</h3>
-        <label class="check"><input type="checkbox" bind:checked={o.mute} /> Без звука</label>
-        {#if !o.mute}
-          {#each m.audioTracks as t (t.index)}
-            {@const to = o.tracks[t.index]}
-            {#if to}
+  {/if}
+
+  {#if m && m.audioTracks.length}
+    <section>
+      <h3 class="h">Звук</h3>
+      <label class="check"><input type="checkbox" bind:checked={o.mute} /> Без звука</label>
+      {#if !o.mute}
+        {#each m.audioTracks as t (t.index)}
+          {@const to = o.tracks[t.index]}
+          {#if to}
             <div class="track">
               <label class="check">
                 <input type="checkbox" bind:checked={to.enabled} />
                 {t.title || `Дорожка ${t.index + 1}`}
-                <span class="dim">{t.codec}, {t.channels === 1 ? "моно" : `${t.channels} канала`}</span>
               </label>
-              <input type="range" min="0" max="2" step="0.05" bind:value={to.volume} disabled={!to.enabled} />
-              <span class="mono val">{Math.round(to.volume * 100)}%</span>
+              {#if o.mode === "encode"}
+                <input type="range" min="0" max="2" step="0.05" bind:value={to.volume} disabled={!to.enabled} />
+                <span class="mono val">{Math.round(to.volume * 100)}%</span>
+              {/if}
             </div>
-            {/if}
-          {/each}
-          {#if m.audioTracks.length > 1}<p class="hint dim">Включённые дорожки сводятся в одну (например, игра + микрофон).</p>{/if}
+          {/if}
+        {/each}
+        {#if m.audioTracks.length > 1}
+          {#if o.mode === "encode"}
+            <div class="seg">
+              <button class:active={o.mixdown} onclick={() => (o.mixdown = true)}>Свести в одну</button>
+              <button class:active={!o.mixdown} onclick={() => (o.mixdown = false)}>Оставить раздельными</button>
+            </div>
+            <p class="hint dim">
+              {o.mixdown
+                ? "Включённые дорожки смешаются с выставленной громкостью. Так клип звучит одинаково в любом плеере и в Discord."
+                : "Каждая включённая дорожка останется отдельной, с выставленной громкостью и своим названием."}
+            </p>
+          {:else}
+            <p class="hint dim">Отмеченные дорожки копируются без изменений. Чтобы менять громкость или свести их в одну, выберите «Перекодировать».</p>
+          {/if}
+        {/if}
+        {#if o.mode === "encode"}
           <label class="row">
             <span>Битрейт звука</span>
             <select bind:value={o.audioBitrateKbps}>
@@ -219,8 +237,8 @@
             </select>
           </label>
         {/if}
-      </section>
-    {/if}
+      {/if}
+    </section>
   {/if}
 
   <section class="grid">

@@ -19,6 +19,7 @@ export function defaultExport(): ExportOptions {
     targetMb: 10,
     audioBitrateKbps: 160,
     mute: false,
+    mixdown: true,
     tracks: {},
   };
 }

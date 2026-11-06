@@ -22,6 +22,26 @@
     app.cap.dirty = true;
   }
 
+  // Приложения для отдельных дорожек: найденные сейчас + уже выбранные, но не запущенные.
+  const appList = $derived.by(() => {
+    const found = (src?.audioApps ?? []).map((a) => ({ ...a, running: true }));
+    const missing = (d?.audioApps ?? [])
+      .filter((exe) => !found.some((a) => a.exe.toLowerCase() === exe.toLowerCase()))
+      .map((exe) => ({ exe, name: exe.replace(/\.exe$/i, ""), playing: false, hasSession: false, running: false }));
+    // Сначала выбранные, затем играющие, затем остальные.
+    return [...missing, ...found].sort(
+      (a, b) => Number(isApp(b.exe)) - Number(isApp(a.exe)) || Number(b.playing) - Number(a.playing),
+    );
+  });
+  function isApp(exe: string) {
+    return !!d?.audioApps.some((x) => x.toLowerCase() === exe.toLowerCase());
+  }
+  function toggleApp(exe: string, on: boolean) {
+    if (!d) return;
+    const rest = d.audioApps.filter((x) => x.toLowerCase() !== exe.toLowerCase());
+    set("audioApps", on ? [...rest, exe] : rest);
+  }
+
   const ramMb = $derived(d ? ((d.bitrateMbps * 1000 + 320) * d.bufferSecs) / 8 / 1024 : 0);
 
   const selectedWindow = $derived(
@@ -186,9 +206,28 @@
 
       <section>
         <h3 class="h">Звук</h3>
-        <label class="check"><input type="checkbox" checked={d.systemAudio} onchange={(e) => set("systemAudio", e.currentTarget.checked)} /> Звук игры</label>
+        <label class="check"><input type="checkbox" checked={d.systemAudio} onchange={(e) => set("systemAudio", e.currentTarget.checked)} /> {d.source === "monitor" ? "Весь звук системы" : "Звук игры"}</label>
         {#if d.source !== "monitor" && d.systemAudio}
           <label class="check sub"><input type="checkbox" checked={d.appAudioOnly} onchange={(e) => set("appAudioOnly", e.currentTarget.checked)} /> Только из этой игры, без Discord и музыки</label>
+        {/if}
+        <div class="apps-head">
+          <span>Отдельные дорожки для приложений</span>
+          <button class="ghost icon" title="Обновить список приложений" onclick={refreshSources}><Icon name="loop" size={13} /></button>
+        </div>
+        <div class="apps">
+          {#each appList as a (a.exe)}
+            <label class="app">
+              <input type="checkbox" checked={isApp(a.exe)} onchange={(e) => toggleApp(a.exe, e.currentTarget.checked)} />
+              <span class="app-name">{a.name}</span>
+              {#if a.playing}<span class="playing" title="Сейчас воспроизводит звук"></span>{/if}
+              {#if !a.running}<span class="dim">не запущено</span>{/if}
+            </label>
+          {:else}
+            <p class="hint">Приложения со звуком появятся здесь. Включите звук в нужной программе и обновите список.</p>
+          {/each}
+        </div>
+        {#if d.audioApps.length && d.systemAudio && d.source === "monitor"}
+          <p class="hint">Звук этих приложений попадёт и в общую дорожку системы. Чтобы не было двойного звука, в редакторе выключите одну из них.</p>
         {/if}
         <label class="check"><input type="checkbox" checked={d.mic} onchange={(e) => set("mic", e.currentTarget.checked)} /> Микрофон отдельной дорожкой</label>
         {#if d.mic}
@@ -509,6 +548,48 @@
     gap: 8px;
     color: var(--text);
     font-size: 13px;
+  }
+  .apps-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--text-2);
+  }
+  .apps {
+    display: grid;
+    gap: 2px;
+    max-height: 190px;
+    overflow: auto;
+    background: var(--bg);
+    border-radius: var(--radius);
+    padding: 4px;
+  }
+  .app {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 6px;
+    border-radius: 3px;
+    color: var(--text);
+    font-size: 13px;
+  }
+  .app:hover {
+    background: var(--panel-2);
+  }
+  .app-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .playing {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--live);
   }
   .check.sub {
     margin-left: 23px;

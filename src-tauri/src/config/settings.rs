@@ -63,6 +63,8 @@ pub struct CaptureSettings {
     /// Только звук выбранного окна (Process Loopback) вместо всего системного.
     pub app_audio_only: bool,
     pub mic: bool,
+    /// Приложения (exe), чей звук пишется отдельными дорожками: Discord, браузер, музыка…
+    pub audio_apps: Vec<String>,
     /// ID устройства, "" = микрофон по умолчанию.
     pub mic_device: String,
     /// Сдвиг звука относительно видео (мс, плюс = позже).
@@ -97,6 +99,7 @@ impl Default for CaptureSettings {
             system_audio: true,
             app_audio_only: false,
             mic: false,
+            audio_apps: Vec::new(),
             mic_device: String::new(),
             audio_offset_ms: 0,
             hotkey_save: "Alt+F10".into(),

@@ -4,6 +4,7 @@
   import { fmtTime, clamp } from "../lib/format";
   import Icon from "./Icon.svelte";
   import Timecode from "./Timecode.svelte";
+  import { Mixer } from "../lib/mixer";
 
   let video: HTMLVideoElement;
   let stage: HTMLDivElement;
@@ -28,11 +29,31 @@
     return () => ro.disconnect();
   });
 
+  // Несколько звуковых дорожек: видео немое, звучит микшер (каждая дорожка со своей громкостью).
+  let mixer: Mixer | null = null;
   $effect(() => {
+    const urls = app.trackUrls;
+    if (urls.length < 2) return;
+    const m = new Mixer(urls);
+    mixer = m;
+    if (video && !video.paused) m.play(video.currentTime);
+    return () => {
+      m.destroy();
+      if (mixer === m) mixer = null;
+    };
+  });
+
+  $effect(() => {
+    const multi = app.trackUrls.length > 1;
     if (video) {
       video.volume = volume;
-      video.muted = muted;
+      video.muted = muted || multi;
       video.playbackRate = rate;
+    }
+    if (multi && mixer) {
+      mixer.setMaster(volume, muted);
+      mixer.setRate(rate);
+      for (const [i, o] of Object.entries(app.opts.tracks)) mixer.setTrack(Number(i), o.enabled, o.volume);
     }
   });
 
@@ -63,6 +84,7 @@
   function loop() {
     if (!video) return;
     app.currentTime = video.currentTime;
+    mixer?.sync(video.currentTime);
     if (app.playRange) {
       const r = curRange();
       if (video.currentTime >= r.end) {
@@ -77,15 +99,18 @@
 
   function onplay() {
     app.playing = true;
+    mixer?.play(video.currentTime);
     cancelAnimationFrame(raf);
     raf = requestAnimationFrame(loop);
   }
   function onpause() {
     app.playing = false;
+    mixer?.pause(video.currentTime);
     cancelAnimationFrame(raf);
     app.currentTime = video.currentTime;
   }
   function onseeked() {
+    mixer?.seek(video.currentTime);
     if (video.paused) app.currentTime = video.currentTime;
   }
 

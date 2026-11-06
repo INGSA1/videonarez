@@ -5,5 +5,6 @@ pub mod proxy;
 pub mod queue;
 pub mod stream_server;
 pub mod thumbnails;
+pub mod tracks;
 pub mod trimmer;
 pub mod waveform;

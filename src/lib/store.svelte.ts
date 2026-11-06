@@ -32,6 +32,10 @@ export const app = $state({
 
   thumbs: [] as Thumb[],
   waveform: null as Waveform | null,
+  /** Волна каждой звуковой дорожки по её индексу. */
+  waveforms: {} as Record<number, Waveform>,
+  /** Отдельные файлы дорожек для просмотра (только если дорожек больше одной). */
+  trackUrls: [] as string[],
   waveLoading: false,
   waveTrack: 0,
 
@@ -202,6 +206,8 @@ export async function openPath(path: string) {
     app.meta = meta;
     app.thumbs = [];
     app.waveform = null;
+    app.waveforms = {};
+    app.trackUrls = [];
     app.waveTrack = 0;
     app.segments = [];
     app.selectedId = null;
@@ -234,24 +240,37 @@ async function analyze(meta: VideoMeta) {
     const count = clamp(Math.ceil(window.innerWidth / 110), 12, 40);
     invoke("extract_thumbnails", { path, count, duration: meta.duration, height: 90 }).catch(() => {});
   }
-  if (meta.audioTracks.length) await loadWaveform(app.waveTrack);
-}
-
-export async function loadWaveform(track: number) {
-  const meta = app.meta;
-  if (!meta || !meta.audioTracks.length) return;
-  const path = meta.path;
-  app.waveTrack = track;
+  if (!meta.audioTracks.length) return;
+  // Несколько дорожек: каждую выносим в отдельный файл, чтобы слышать их все при просмотре.
+  if (meta.audioTracks.length > 1) {
+    invoke<string[]>("extract_audio_tracks", { path })
+      .then((files) => {
+        if (app.meta?.path === path) app.trackUrls = files.map((f) => convertFileSrc(f, "clip"));
+      })
+      .catch((e) => {
+        if (!String(e).includes("Отменено")) console.warn("tracks", e);
+      });
+  }
+  // Волна каждой дорожки; метки громкости берутся с выбранной (по умолчанию первой).
   app.waveLoading = true;
-  app.waveform = null;
   try {
-    const wf = await invoke<Waveform>("extract_waveform", { path, track, duration: meta.duration });
-    if (app.meta?.path === path && app.waveTrack === track) app.waveform = wf;
+    for (const t of meta.audioTracks) {
+      const wf = await invoke<Waveform>("extract_waveform", { path, track: t.index, duration: meta.duration });
+      if (app.meta?.path !== path) return;
+      app.waveforms[t.index] = wf;
+      if (t.index === app.waveTrack) app.waveform = wf;
+    }
   } catch (e) {
     if (!String(e).includes("Отменено")) console.warn("waveform", e);
   } finally {
     if (app.meta?.path === path) app.waveLoading = false;
   }
+}
+
+/** Чья волна даёт метки громких моментов. */
+export function loadWaveform(track: number) {
+  app.waveTrack = track;
+  app.waveform = app.waveforms[track] ?? null;
 }
 
 /**
@@ -471,6 +490,7 @@ export async function startExport() {
       })),
       audioBitrateKbps: o.audioBitrateKbps,
       mute: o.mute,
+      mixdown: o.mixdown,
     },
   };
   player.el?.pause();

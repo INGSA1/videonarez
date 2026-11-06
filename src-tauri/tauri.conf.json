@@ -18,6 +18,7 @@
         "height": 900,
         "minWidth": 1000,
         "minHeight": 640,
+        "center": true,
         "dragDropEnabled": true,
         "visible": false,
         "backgroundColor": "#1b1c1e",

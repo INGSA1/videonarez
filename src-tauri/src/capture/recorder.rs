@@ -156,6 +156,7 @@ pub struct CaptureSources {
     pub monitors: Vec<MonitorInfo>,
     pub windows: Vec<WindowInfo>,
     pub mics: Vec<AudioDevice>,
+    pub audio_apps: Vec<super::audio::AudioApp>,
 }
 
 // ---------- Запуск ----------
@@ -258,6 +259,16 @@ fn start_inner(app: &AppHandle) -> AppResult<()> {
             (Target::Window(w), None, true) => audio.push((AudioSource::Process(w.pid), "Игра".into())),
             _ => audio.push((AudioSource::System, "Системный звук".into())),
         }
+    }
+    // Отдельные дорожки выбранных приложений (без дублей с дорожкой игры).
+    let game_exe = game.as_ref().map(|g| g.exe.to_lowercase());
+    let mut seen = std::collections::HashSet::new();
+    for exe in &cs.audio_apps {
+        let key = exe.trim().to_lowercase();
+        if key.is_empty() || !seen.insert(key.clone()) || (cs.app_audio_only && game_exe.as_deref() == Some(key.as_str())) {
+            continue;
+        }
+        audio.push((AudioSource::App(exe.trim().to_string()), super::audio::app_display_name(exe.trim())));
     }
     if cs.mic {
         let id = (!cs.mic_device.is_empty()).then(|| cs.mic_device.clone());
@@ -682,7 +693,13 @@ pub fn spawn_monitor(app: AppHandle) {
 #[tauri::command]
 pub fn capture_sources() -> CaptureSources {
     let (gpu, monitors) = sources::gpu_and_monitors();
-    CaptureSources { gpu, monitors, windows: sources::windows(), mics: list_inputs() }
+    CaptureSources {
+        gpu,
+        monitors,
+        windows: sources::windows(),
+        mics: list_inputs(),
+        audio_apps: super::audio::list_audio_apps(),
+    }
 }
 
 #[tauri::command]

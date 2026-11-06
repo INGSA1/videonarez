@@ -85,6 +85,7 @@ export interface CaptureSettings {
   appAudioOnly: boolean;
   mic: boolean;
   micDevice: string;
+  audioApps: string[];
   audioOffsetMs: number;
   hotkeySave: string;
   hotkeyRecord: string;
@@ -161,6 +162,14 @@ export interface CaptureSources {
   monitors: MonitorInfo[];
   windows: WindowInfo[];
   mics: AudioDevice[];
+  audioApps: AudioApp[];
+}
+
+export interface AudioApp {
+  exe: string;
+  name: string;
+  playing: boolean;
+  hasSession: boolean;
 }
 
 export interface ClipSaved {
@@ -203,6 +212,8 @@ export interface ExportOptions {
   targetMb: number;
   audioBitrateKbps: number;
   mute: boolean;
+  /** Свести включённые дорожки в одну при перекодировании (иначе оставить раздельными). */
+  mixdown: boolean;
   tracks: Record<number, TrackOpt>;
 }
 

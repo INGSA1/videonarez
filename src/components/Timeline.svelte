@@ -7,13 +7,17 @@
   const RULER = 22;
   const THUMB = 50;
   const GAP = 3;
-  const WAVE = 46;
   const LANE = 18;
   const TOP_T = RULER;
   const TOP_W = RULER + THUMB + GAP;
-  const TOP_L = TOP_W + WAVE + GAP;
-  const H = TOP_L + LANE + 6;
-  const BODY_H = THUMB + GAP + WAVE;
+  // Звук: одна дорожка — общая волна; несколько — по полосе на каждую.
+  const AL = 30;
+  const AGAP = 2;
+  const nTracks = $derived(Math.max(1, app.meta?.audioTracks.length ?? 1));
+  const WAVE = $derived(nTracks > 1 ? nTracks * AL + (nTracks - 1) * AGAP : 46);
+  const TOP_L = $derived(TOP_W + WAVE + GAP);
+  const H = $derived(TOP_L + LANE + 6);
+  const BODY_H = $derived(THUMB + GAP + WAVE);
 
   // Та же палитра, что и в app.css: графит, мел, жёлтые метки монтажа.
   const C = {
@@ -129,26 +133,51 @@
       for (let x = 0; x < width; x += tw) ctx.fillRect(Math.round(x), TOP_T, 1, THUMB);
     }
 
-    // Волна
-    ctx.fillStyle = C.track;
-    ctx.fillRect(0, TOP_W, width, WAVE);
+    // Звуковые дорожки
     const r = curRange();
+    const multi = nTracks > 1;
+    const laneH = multi ? AL : WAVE;
+    for (let k = 0; k < nTracks; k++) {
+      const y0 = TOP_W + k * (laneH + AGAP);
+      ctx.fillStyle = C.track;
+      ctx.fillRect(0, y0, width, laneH);
+      const wf = multi ? app.waveforms[k] : app.waveform;
+      const opt = app.opts.tracks[k];
+      const on = !opt || opt.enabled;
+      const gain = Math.min(2, opt?.volume ?? 1);
+      if (wf && wf.peaks.length) {
+        const n = wf.peaks.length;
+        const per = wf.bucketSec;
+        const mid = y0 + laneH / 2;
+        ctx.globalAlpha = on ? 1 : 0.28;
+        for (let x = 0; x < width; x++) {
+          const ta = x2t(x);
+          const a = Math.floor(ta / per);
+          const b = Math.max(a + 1, Math.floor(x2t(x + 1) / per));
+          let mx = 0;
+          for (let i = Math.max(0, a); i < Math.min(n, b); i++) if (wf.peaks[i] > mx) mx = wf.peaks[i];
+          // квадрат — визуально контрастнее; громкость дорожки меняет высоту волны
+          const hh = Math.min(laneH / 2 - 2, (mx * mx * (laneH - 6)) / 2 * (multi ? gain : 1));
+          if (hh < 0.4) continue;
+          ctx.fillStyle = ta >= r.start && ta <= r.end ? C.waveIn : C.wave;
+          ctx.fillRect(x, mid - hh, 1, hh * 2);
+        }
+        ctx.globalAlpha = 1;
+      }
+      if (multi) {
+        const t = m.audioTracks[k];
+        const label = `${t?.title || `Дорожка ${k + 1}`}${on ? "" : ", выключена"}`;
+        ctx.font = FONT_UI;
+        const w = ctx.measureText(label).width + 10;
+        ctx.fillStyle = "rgba(27,28,30,0.85)";
+        ctx.fillRect(4, y0 + 3, w, 15);
+        ctx.fillStyle = on ? C.segText : C.tickText;
+        ctx.textBaseline = "middle";
+        ctx.fillText(label, 9, y0 + 11);
+      }
+    }
     const wf = app.waveform;
     if (wf && wf.peaks.length) {
-      const n = wf.peaks.length;
-      const per = wf.bucketSec;
-      const mid = TOP_W + WAVE / 2;
-      for (let x = 0; x < width; x++) {
-        const ta = x2t(x);
-        const a = Math.floor(ta / per);
-        const b = Math.max(a + 1, Math.floor(x2t(x + 1) / per));
-        let mx = 0;
-        for (let i = Math.max(0, a); i < Math.min(n, b); i++) if (wf.peaks[i] > mx) mx = wf.peaks[i];
-        const hh = mx * mx * (WAVE - 6) / 2; // квадрат — визуально контрастнее
-        if (hh < 0.4) continue;
-        ctx.fillStyle = ta >= r.start && ta <= r.end ? C.waveIn : C.wave;
-        ctx.fillRect(x, mid - hh, 1, hh * 2);
-      }
       for (const mk of wf.markers) {
         const x = t2x(mk.time);
         if (x < -6 || x > width + 6) continue;
@@ -165,8 +194,9 @@
     } else {
       ctx.fillStyle = C.tickText;
       ctx.font = FONT_UI;
-      const msg = app.waveLoading ? "Анализ звука…" : m.audioTracks.length ? "" : "Нет звуковой дорожки";
-      if (msg) ctx.fillText(msg, 10, TOP_W + WAVE / 2);
+      const loading = app.waveLoading && !Object.keys(app.waveforms).length;
+      const msg = loading ? "Анализ звука…" : m.audioTracks.length ? "" : "Нет звуковой дорожки";
+      if (msg) ctx.fillText(msg, multi ? 160 : 10, TOP_W + WAVE / 2);
     }
 
     // Дорожка клипов
@@ -401,9 +431,9 @@
     </div>
     <div class="tools">
       {#if app.meta && app.meta.audioTracks.length > 1}
-        <select value={app.waveTrack} onchange={(e) => loadWaveform(Number((e.target as HTMLSelectElement).value))} title="Дорожка для волны и пиков">
+        <select value={app.waveTrack} onchange={(e) => loadWaveform(Number((e.target as HTMLSelectElement).value))} title="С какой дорожки брать метки громких моментов">
           {#each app.meta.audioTracks as t (t.index)}
-            <option value={t.index}>{t.title || `Звук ${t.index + 1}`}</option>
+            <option value={t.index}>Метки по: {t.title || `дорожка ${t.index + 1}`}</option>
           {/each}
         </select>
       {/if}
@@ -412,6 +442,29 @@
       <button class="ghost icon" title="Весь ролик (0)" onclick={fit}><Icon name="fit" /></button>
     </div>
   </div>
+  {#if app.meta && app.meta.audioTracks.length > 1}
+    <div class="mixer" aria-label="Звуковые дорожки">
+      {#each app.meta.audioTracks as t (t.index)}
+        {@const o = app.opts.tracks[t.index]}
+        {#if o}
+          <div class="ch" class:off={!o.enabled}>
+            <button
+              class="tog"
+              class:on={o.enabled}
+              title={o.enabled ? "Выключить дорожку" : "Включить дорожку"}
+              onclick={() => (o.enabled = !o.enabled)}
+            >
+              <Icon name={o.enabled ? "volume" : "mute"} size={13} />
+              <span class="nm">{t.title || `Дорожка ${t.index + 1}`}</span>
+            </button>
+            <input type="range" min="0" max="2" step="0.05" bind:value={o.volume} disabled={!o.enabled} title="Громкость дорожки" />
+            <span class="pct mono">{Math.round(o.volume * 100)}%</span>
+          </div>
+        {/if}
+      {/each}
+      {#if !app.trackUrls.length}<span class="dim prep">Готовлю дорожки для прослушивания</span>{/if}
+    </div>
+  {/if}
   <div class="canvas-wrap" bind:this={wrap} style="height:{H}px">
     <canvas bind:this={base} style="width:{width}px;height:{H}px"></canvas>
     <canvas
@@ -455,6 +508,46 @@
     font-size: 11px;
     padding: 2px 6px;
     margin-right: 6px;
+  }
+  .mixer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
+    align-items: center;
+    padding: 2px 10px 8px;
+  }
+  .ch {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .tog {
+    padding: 4px 8px;
+    background: var(--bg);
+    color: var(--text-3);
+    max-width: 180px;
+  }
+  .tog.on {
+    color: var(--text);
+  }
+  .nm {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ch input[type="range"] {
+    width: 90px;
+  }
+  .ch.off input[type="range"] {
+    opacity: 0.4;
+  }
+  .pct {
+    width: 38px;
+    font-size: 12px;
+    color: var(--text-2);
+  }
+  .prep {
+    font-size: 12px;
   }
   .canvas-wrap {
     position: relative;

@@ -20,13 +20,14 @@
     letter-spacing: 0;
     white-space: nowrap;
   }
+  /* 1ch — ширина цифры «0» в этом же шрифте: ячейка всегда по размеру цифр, без наезда. */
   .tc span {
     display: inline-block;
-    width: 0.74em;
+    width: 1.04ch;
     text-align: center;
   }
   .tc span.sep {
-    width: 0.34em;
+    width: 0.5ch;
     color: var(--text-3);
   }
   .cue {
