@@ -1,6 +1,6 @@
 <script lang="ts">
   import {
-    app, captureToggle, captureSave, captureRecord, applyCapture, refreshSources, openInEditor, reveal,
+    app, captureToggle, captureSave, captureRecord, applyCapture, refreshSources, openInEditor, reveal, setAutostart,
   } from "../lib/store.svelte";
   import { fmtTime, fmtDur } from "../lib/format";
   import Icon from "./Icon.svelte";
@@ -67,6 +67,7 @@
 
   const fileName = (p: string) => p.split(/[\\/]/).pop() ?? p;
   const recording = $derived(st?.recordingSecs != null);
+  const armed = $derived(!!st && (st.running || st.waitingForGame));
   const fill = $derived(st && st.maxSecs ? Math.min(100, (st.bufferedSecs / st.maxSecs) * 100) : 0);
 </script>
 
@@ -75,14 +76,18 @@
 <div class="capture">
   <!-- Левая колонка: состояние и действия -->
   <div class="col main">
-    <section class="status" class:on={st?.running} class:rec={recording}>
+    <section class="status" class:on={st?.running} class:wait={st?.waitingForGame} class:rec={recording}>
       <div class="head">
         <span class="dot"></span>
         <h2>
           {#if st?.starting}Запуск захвата…{:else if recording}Идёт запись · <span class="mono">{fmtTime(st?.recordingSecs ?? 0, 0)}</span>
-          {:else if st?.running}Буфер повтора работает{:else}Захват выключен{/if}
+          {:else if st?.running}Буфер повтора работает{#if st.game}<span class="game"> · {st.game}</span>{/if}
+          {:else if st?.waitingForGame}Ожидание полноэкранной игры…{:else}Захват выключен{/if}
         </h2>
       </div>
+      {#if st?.waitingForGame}
+        <p class="muted">Запустите игру — буфер включится автоматически через пару секунд после того, как она развернётся на весь экран.</p>
+      {/if}
 
       {#if st?.running}
         <div class="buffer">
@@ -103,7 +108,7 @@
           <span class="muted">{st.pipeline}</span>
           <span class="dim">· {st.source}</span>
         </div>
-      {:else}
+      {:else if !st?.waitingForGame}
         <p class="muted">
           Включите буфер — последние {d?.bufferSecs ?? 60} с экрана и звука будут храниться в оперативной памяти.
           По <kbd>{d?.hotkeySave || "—"}</kbd> они мгновенно сохраняются в клип, на диск до этого ничего не пишется.
@@ -111,9 +116,9 @@
       {/if}
 
       <div class="actions">
-        <button class:primary={!st?.running} onclick={captureToggle} disabled={app.cap.busy || st?.starting}>
-          <Icon name={st?.running ? "x" : "play"} />
-          {st?.running ? "Выключить буфер" : "Включить буфер повтора"}
+        <button class:primary={!armed} onclick={captureToggle} disabled={app.cap.busy || st?.starting}>
+          <Icon name={armed ? "x" : "play"} />
+          {armed ? "Выключить буфер" : d?.source === "auto" ? "Включить (ждать игру)" : "Включить буфер повтора"}
         </button>
         <button class="save" onclick={captureSave} disabled={!st?.running}>
           <Icon name="scissors" /> Сохранить повтор {#if d?.hotkeySave}<kbd>{d.hotkeySave}</kbd>{/if}
@@ -161,16 +166,30 @@
           <button class="ghost icon" title="Обновить списки" onclick={refreshSources}><Icon name="loop" size={14} /></button>
         </div>
         <div class="seg">
+          <button class:active={d.source === "auto"} onclick={() => set("source", "auto")}>Авто: игра</button>
           <button class:active={d.source === "monitor"} onclick={() => set("source", "monitor")}>Монитор</button>
-          <button class:active={d.source === "window"} onclick={() => set("source", "window")}>Окно игры</button>
+          <button class:active={d.source === "window"} onclick={() => set("source", "window")}>Окно</button>
         </div>
-        {#if d.source === "monitor"}
+        {#if d.source === "auto"}
+          <p class="hint dim">
+            Буфер включается сам, когда на переднем плане появляется полноэкранная игра (обычный или borderless
+            fullscreen), и выключается, когда игра закрыта. Браузеры, плееры и оболочка Windows не считаются играми.
+          </p>
+          <label>
+            <span>Не считать играми <span class="dim">(exe через запятую)</span></span>
+            <input
+              placeholder="например: photoshop.exe, premiere.exe"
+              value={d.gameExclude.join(", ")}
+              onchange={(e) => set("gameExclude", e.currentTarget.value.split(",").map((s) => s.trim()).filter(Boolean))}
+            />
+          </label>
+        {:else if d.source === "monitor"}
           <select value={d.monitor} onchange={(e) => set("monitor", Number(e.currentTarget.value))}>
             {#each src?.monitors ?? [] as m (m.index)}
               <option value={m.index}>Монитор {m.index + 1} — {m.width}×{m.height}{m.primary ? " (основной)" : ""}</option>
             {/each}
           </select>
-          <p class="hint dim">Лучший вариант для полноэкранных игр.{src?.gpu?.vendor === "amf" ? " На AMD захват идёт целиком в видеопамяти." : ""}</p>
+          <p class="hint dim">Лучший вариант для полноэкранных игр.</p>
         {:else}
           <select value={selectedWindow ? String(selectedWindow.hwnd) : ""} onchange={(e) => pickWindow(e.currentTarget.value)}>
             <option value="" disabled>{d.windowExe ? `${d.windowExe} (не запущено)` : "Выберите окно…"}</option>
@@ -185,7 +204,7 @@
       <section>
         <h4>Звук</h4>
         <label class="check"><input type="checkbox" checked={d.systemAudio} onchange={(e) => set("systemAudio", e.currentTarget.checked)} /> Звук игры / системы</label>
-        {#if d.source === "window" && d.systemAudio}
+        {#if d.source !== "monitor" && d.systemAudio}
           <label class="check sub"><input type="checkbox" checked={d.appAudioOnly} onchange={(e) => set("appAudioOnly", e.currentTarget.checked)} /> Только звук этого окна <span class="dim">(без Discord и музыки)</span></label>
         {/if}
         <label class="check"><input type="checkbox" checked={d.mic} onchange={(e) => set("mic", e.currentTarget.checked)} /> Микрофон <span class="dim">— отдельной дорожкой</span></label>
@@ -264,9 +283,14 @@
 
       <section>
         <h4>Поведение</h4>
+        <label class="check"><input type="checkbox" checked={app.autostart} onchange={(e) => setAutostart(e.currentTarget.checked)} /> Запускать вместе с Windows <span class="dim">(сразу в трей, без окна)</span></label>
         <label class="check"><input type="checkbox" checked={d.autoStart} onchange={(e) => set("autoStart", e.currentTarget.checked)} /> Включать буфер при запуске приложения</label>
         <label class="check"><input type="checkbox" checked={d.closeToTray} onchange={(e) => set("closeToTray", e.currentTarget.checked)} /> Закрытие окна сворачивает в трей</label>
         <label class="check"><input type="checkbox" checked={d.sound} onchange={(e) => set("sound", e.currentTarget.checked)} /> Звуковой сигнал при сохранении клипа</label>
+        {#if src?.gpu?.vendor === "amf"}
+          <label class="check"><input type="checkbox" checked={d.amfDirect} onchange={(e) => set("amfDirect", e.currentTarget.checked)} /> Прямой захват AMD (zero-copy) <span class="dim">— экспериментально</span></label>
+          <p class="hint dim">Меньше нагрузка на CPU (~0,5%), но с этим режимом во время игры был замечен сбой драйвера AMD. По умолчанию — стабильный Windows.Graphics.Capture, как в Xbox Game Bar и OBS.</p>
+        {/if}
       </section>
 
       <div class="apply">
@@ -340,6 +364,18 @@
   .on .dot {
     background: var(--ok);
     box-shadow: 0 0 0 4px rgba(61, 220, 151, 0.15);
+  }
+  .status.wait {
+    border-color: rgba(255, 194, 75, 0.4);
+  }
+  .wait .dot {
+    background: var(--warn);
+    box-shadow: 0 0 0 4px rgba(255, 194, 75, 0.15);
+    animation: pulse 1.6s infinite;
+  }
+  .game {
+    color: var(--text-2);
+    font-weight: 400;
   }
   .rec .dot {
     background: var(--accent-2);

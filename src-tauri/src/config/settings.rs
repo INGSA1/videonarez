@@ -40,8 +40,10 @@ impl Default for Settings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CaptureSettings {
-    /// monitor | window
+    /// monitor | window | auto (следовать за полноэкранной игрой)
     pub source: String,
+    /// exe, которые не считать играми в режиме auto.
+    pub game_exclude: Vec<String>,
     /// Индекс выхода DXGI (монитора).
     pub monitor: u32,
     /// Окно запоминается по exe (HWND меняется между запусками игры).
@@ -73,12 +75,16 @@ pub struct CaptureSettings {
     pub sound: bool,
     /// Закрытие окна сворачивает в трей (WebView2 уничтожается, захват продолжается).
     pub close_to_tray: bool,
+    /// Прямой захват AMD (vsrc_amf, zero-copy). Экспериментально: при резкой остановке во время
+    /// игры был замечен сбой драйвера, поэтому по умолчанию используется Windows.Graphics.Capture.
+    pub amf_direct: bool,
 }
 
 impl Default for CaptureSettings {
     fn default() -> Self {
         Self {
             source: "monitor".into(),
+            game_exclude: Vec::new(),
             monitor: 0,
             window_exe: String::new(),
             window_title: String::new(),
@@ -98,6 +104,7 @@ impl Default for CaptureSettings {
             auto_start: false,
             sound: true,
             close_to_tray: true,
+            amf_direct: false,
         }
     }
 }

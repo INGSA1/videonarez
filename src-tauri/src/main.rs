@@ -54,6 +54,27 @@ fn show_main_window(app: tauri::AppHandle) {
     shell::show_main(&app);
 }
 
+/// Автозапуск вместе с Windows (сразу в трей, без окна).
+#[tauri::command]
+fn get_autostart(app: tauri::AppHandle) -> bool {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().unwrap_or(false)
+}
+
+#[tauri::command]
+fn set_autostart(app: tauri::AppHandle, enabled: bool) -> AppResult<bool> {
+    use tauri_plugin_autostart::ManagerExt;
+    let al = app.autolaunch();
+    let r = if enabled { al.enable() } else { al.disable() };
+    r.map_err(|e| error::AppError::msg(format!("Не удалось изменить автозапуск: {e}")))?;
+    Ok(al.is_enabled().unwrap_or(enabled))
+}
+
+/// Запуск с `--tray` (автозапуск Windows): окно и WebView2 не создаются вовсе.
+fn started_in_tray() -> bool {
+    std::env::args().any(|a| a == "--tray")
+}
+
 fn main() {
     let app = tauri::Builder::default()
         // Повторный запуск (ярлык, «Открыть с помощью») показывает уже работающее окно из трея.
@@ -62,6 +83,10 @@ fn main() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--tray"]),
+        ))
         .manage(AppState::default())
         // clip://localhost/<путь> — потоковая отдача видео плееру с поддержкой Range.
         .register_asynchronous_uri_scheme_protocol("clip", |ctx, request, responder| {
@@ -77,6 +102,14 @@ fn main() {
                 eprintln!("hotkey: {e}");
             }
             capture::recorder::spawn_monitor(app.handle().clone());
+            capture::games::spawn_watcher(app.handle().clone());
+            if let Some(w) = app.get_webview_window("main") {
+                if started_in_tray() {
+                    let _ = w.destroy();
+                } else {
+                    let _ = w.show();
+                }
+            }
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 config::gpu::ensure_detected(&handle).await;
@@ -112,6 +145,13 @@ fn main() {
             capture::recorder::capture_save,
             capture::recorder::capture_toggle_record,
             capture::recorder::capture_apply_settings,
+            capture::recorder::capture_recent,
+            editor::queue::queue_add,
+            editor::queue::queue_list,
+            editor::queue::queue_cancel,
+            editor::queue::queue_clear,
+            get_autostart,
+            set_autostart,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Videonarez");

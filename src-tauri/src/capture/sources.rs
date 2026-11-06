@@ -97,7 +97,7 @@ pub fn gpu_and_monitors() -> (Option<GpuInfo>, Vec<MonitorInfo>) {
     (gpu, monitors)
 }
 
-fn process_exe(pid: u32) -> String {
+pub fn process_exe(pid: u32) -> String {
     unsafe {
         let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
             return String::new();

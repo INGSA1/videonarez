@@ -84,6 +84,13 @@
     o.preset = "custom";
   }
 
+  const curJob = $derived(app.queue.find((j) => j.id === app.currentJob));
+  const activeJobs = $derived(app.queue.filter((j) => j.status === "queued" || j.status === "running").length);
+  const queueBusy = $derived(activeJobs > 0);
+  const queuePos = $derived(
+    curJob ? app.queue.filter((j) => j.id < curJob.id && (j.status === "queued" || j.status === "running")).length : 0,
+  );
+
   const qualityLabel = $derived(o.quality <= 18 ? "почти без потерь" : o.quality <= 22 ? "высокое" : o.quality <= 27 ? "среднее" : "низкое, маленький файл");
 </script>
 
@@ -247,19 +254,26 @@
       <div class="dim">{estimate}</div>
     </div>
 
-    {#if app.exporting}
+    {#if app.exporting && curJob?.status === "running"}
       <div class="progress">
         <div class="pbar"><span style="width:{app.progress.percent}%"></span></div>
         <div class="pinfo">
           <span>{app.progress.stage}{app.progress.total > 1 ? ` · ${app.progress.current}/${app.progress.total}` : ""}</span>
           <span class="mono">{app.progress.percent.toFixed(0)}%</span>
         </div>
-        <button onclick={cancelExport}><Icon name="x" /> Отменить</button>
+        <button onclick={() => cancelExport()}><Icon name="x" /> Отменить</button>
       </div>
-    {:else}
-      <button class="primary go" disabled={!m || totalDur <= 0} onclick={startExport}>
-        <Icon name="scissors" /> Экспортировать <kbd>Ctrl+E</kbd>
-      </button>
+    {:else if app.exporting && curJob?.status === "queued"}
+      <div class="progress">
+        <div class="pinfo"><span>В очереди · перед ним заданий: {queuePos}</span></div>
+        <button onclick={() => cancelExport()}><Icon name="x" /> Убрать из очереди</button>
+      </div>
+    {/if}
+    <button class="primary go" disabled={!m || totalDur <= 0} onclick={startExport}>
+      <Icon name="scissors" /> {queueBusy ? "Добавить в очередь" : "Экспортировать"} <kbd>Ctrl+E</kbd>
+    </button>
+    {#if queueBusy}
+      <button class="ghost qlink" onclick={() => (app.tab = "queue")}>Очередь экспорта: {activeJobs} в работе →</button>
     {/if}
 
     {#if app.result}
@@ -433,6 +447,11 @@
   .progress {
     display: grid;
     gap: 6px;
+  }
+  .qlink {
+    justify-content: center;
+    font-size: 12px;
+    color: var(--text-2);
   }
   .pbar {
     height: 6px;

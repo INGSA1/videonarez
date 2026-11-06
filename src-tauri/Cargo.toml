@@ -12,6 +12,7 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2"
 wasapi = "0.26"
 windows = { version = "0.62", features = [
     "Win32_Foundation",

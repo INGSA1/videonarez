@@ -2,6 +2,7 @@
 //! сохранение повтора по горячей клавише, обычная запись, статус и автоперезапуск.
 
 use super::audio::{list_inputs, AudioDevice, AudioFeed, AudioSource};
+use super::games::GameInfo;
 use super::pipeline::{build_args, candidates, Candidate, Target};
 use super::ring::Ring;
 use super::sources::{self, GpuInfo, MonitorInfo, WindowInfo};
@@ -44,10 +45,29 @@ pub struct Session {
     pub ffmpeg_pid: u32,
 }
 
+/// Мягкая остановка: «q» → FFmpeg сам корректно закрывает захват и аппаратный энкодер.
+/// Резкое убийство процесса посреди захвата на уровне драйвера опасно для видеодрайвера,
+/// поэтому kill — только если за 3 секунды процесс не завершился сам.
+fn graceful_stop(child: &mut Child) {
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        let _ = stdin.write_all(b"q");
+        let _ = stdin.flush();
+    }
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        if let Ok(Some(_)) = child.try_wait() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        graceful_stop(&mut self.child);
         if let Some(h) = self.reader.take() {
             let _ = h.join();
         }
@@ -62,8 +82,18 @@ pub struct Recorder {
     pub last_clip: Mutex<Option<String>>,
     stats: Mutex<Stats>,
     restarts: Mutex<Vec<Instant>>,
-    /// Пользователь хочет, чтобы буфер работал (для автоперезапуска).
+    /// Пользователь хочет, чтобы буфер работал (для автоперезапуска и режима «авто»).
     wanted: AtomicBool,
+    /// Игра, за которой следит режим «авто».
+    pub game: Mutex<Option<GameInfo>>,
+    /// Клипы, сохранённые за время работы приложения (переживают пересоздание окна).
+    pub recent: Mutex<Vec<ClipSaved>>,
+}
+
+impl Recorder {
+    pub fn is_wanted(&self) -> bool {
+        self.wanted.load(Ordering::Relaxed)
+    }
 }
 
 #[derive(Default, Clone, Copy)]
@@ -95,6 +125,9 @@ pub struct CaptureStatus {
     pub audio_errors: Vec<String>,
     pub last_clip: Option<String>,
     pub ffmpeg_pid: Option<u32>,
+    /// Режим «авто»: буфер взведён и ждёт полноэкранную игру.
+    pub waiting_for_game: bool,
+    pub game: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -116,7 +149,18 @@ pub struct CaptureSources {
 
 // ---------- Запуск ----------
 
-fn resolve_target(cs: &CaptureSettings, monitors: &[MonitorInfo]) -> AppResult<Target> {
+fn resolve_target(cs: &CaptureSettings, monitors: &[MonitorInfo], game: Option<&GameInfo>) -> AppResult<Target> {
+    if cs.source == "auto" {
+        // Игру пишем захватом её монитора: так работает и эксклюзивный fullscreen.
+        let g = game.ok_or_else(|| AppError::msg("Игра не обнаружена"))?;
+        return monitors
+            .iter()
+            .find(|m| m.hmonitor == g.hmonitor)
+            .or_else(|| monitors.first())
+            .cloned()
+            .map(Target::Monitor)
+            .ok_or_else(|| AppError::msg("Не найден монитор игры"));
+    }
     if cs.source == "window" {
         let list = sources::windows();
         let exe = cs.window_exe.to_lowercase();
@@ -156,6 +200,13 @@ pub fn start(app: &AppHandle) -> AppResult<()> {
     if rec.session.lock().unwrap().is_some() {
         return Ok(());
     }
+    // Режим «авто» без игры: буфер взведён, захват начнёт следящий поток.
+    if state.settings().capture.source == "auto" && rec.game.lock().unwrap().is_none() {
+        *rec.last_error.lock().unwrap() = None;
+        emit_status(app);
+        crate::shell::refresh_tray(app);
+        return Ok(());
+    }
     if rec.starting.swap(true, Ordering::SeqCst) {
         return Err(AppError::msg("Захват уже запускается"));
     }
@@ -164,7 +215,14 @@ pub fn start(app: &AppHandle) -> AppResult<()> {
     rec.starting.store(false, Ordering::SeqCst);
     match &res {
         Ok(()) => *rec.last_error.lock().unwrap() = None,
-        Err(e) => *rec.last_error.lock().unwrap() = Some(e.to_string()),
+        Err(e) => {
+            eprintln!("[capture] start failed: {e}");
+            *rec.last_error.lock().unwrap() = Some(e.to_string());
+            // Ручной режим: неудачный запуск снимает «взвод». В режиме «авто» ждём следующую игру.
+            if state.settings().capture.source != "auto" {
+                rec.wanted.store(false, Ordering::Relaxed);
+            }
+        }
     }
     emit_status(app);
     crate::shell::refresh_tray(app);
@@ -176,15 +234,17 @@ fn start_inner(app: &AppHandle) -> AppResult<()> {
     let settings = state.settings();
     let cs = settings.capture.clone();
     let (_gpu, monitors) = sources::gpu_and_monitors();
-    let target = resolve_target(&cs, &monitors)?;
+    let game = if cs.source == "auto" { state.recorder.game.lock().unwrap().clone() } else { None };
+    let target = resolve_target(&cs, &monitors, game.as_ref())?;
     let codec = if cs.codec == "hevc" { "hevc" } else { "h264" };
     let enc = gpu::pick(&settings.encoders, &cs.encoder, codec)
         .ok_or_else(|| AppError::msg(format!("Нет кодировщика {} для записи", codec.to_uppercase())))?;
 
     let mut audio: Vec<(AudioSource, String)> = Vec::new();
     if cs.system_audio {
-        match (&target, cs.app_audio_only) {
-            (Target::Window(w), true) => audio.push((AudioSource::Process(w.pid), "Игра".into())),
+        match (&target, &game, cs.app_audio_only) {
+            (_, Some(g), true) => audio.push((AudioSource::Process(g.pid), "Игра".into())),
+            (Target::Window(w), None, true) => audio.push((AudioSource::Process(w.pid), "Игра".into())),
             _ => audio.push((AudioSource::System, "Системный звук".into())),
         }
     }
@@ -196,7 +256,14 @@ fn start_inner(app: &AppHandle) -> AppResult<()> {
     let mut errors = Vec::new();
     for cand in candidates(&target, &cs, &enc) {
         match try_start(&cand, &enc, &cs, &target, &audio) {
-            Ok(sess) => {
+            Ok(mut sess) => {
+                if let Some(g) = &game {
+                    sess.source = format!("Игра: {}", g.name());
+                    let stem = g.exe.trim_end_matches(".exe").trim_end_matches(".EXE");
+                    if !stem.is_empty() {
+                        sess.prefix = stem.to_string();
+                    }
+                }
                 *state.recorder.session.lock().unwrap() = Some(sess);
                 *state.recorder.stats.lock().unwrap() = Stats::default();
                 return Ok(());
@@ -231,7 +298,7 @@ fn try_start(
 
     let ffmpeg = tools().map_err(|e| e.to_string())?.ffmpeg.clone();
     let mut cmd = Command::new(ffmpeg);
-    cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.args(&args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW | NORMAL_PRIORITY);
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
@@ -284,8 +351,7 @@ fn try_start(
             return Err(if err.is_empty() { format!("FFmpeg завершился ({status})") } else { last_line(&err) });
         }
         if Instant::now() > deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            graceful_stop(&mut child);
             let _ = reader.join();
             return Err("нет кадров за 8 секунд".into());
         }
@@ -314,9 +380,15 @@ fn last_line(s: &str) -> String {
     s.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or(s).trim().to_string()
 }
 
+/// Выключить буфер совсем (кнопка, трей, выход).
 pub fn stop(app: &AppHandle) {
+    app.state::<AppState>().recorder.wanted.store(false, Ordering::Relaxed);
+    stop_session(app);
+}
+
+/// Остановить текущий захват, не снимая «взвода» (смена игры, выход из игры, перезапуск).
+pub fn stop_session(app: &AppHandle) {
     let state = app.state::<AppState>();
-    state.recorder.wanted.store(false, Ordering::Relaxed);
     let sess = state.recorder.session.lock().unwrap().take();
     if let Some(s) = sess {
         let rec = s.ring.lock().unwrap().stop_recording();
@@ -376,7 +448,13 @@ fn notify_saved(app: &AppHandle, path: &Path, duration: f64, kind: &str) {
     if state.settings().capture.sound {
         sources::beep();
     }
-    let _ = app.emit("clip-saved", ClipSaved { path: p, duration, kind: kind.into() });
+    let clip = ClipSaved { path: p, duration, kind: kind.into() };
+    {
+        let mut r = state.recorder.recent.lock().unwrap();
+        r.insert(0, clip.clone());
+        r.truncate(50);
+    }
+    let _ = app.emit("clip-saved", clip);
 }
 
 /// Сохранить последние `secs` секунд буфера (None — весь буфер).
@@ -486,6 +564,10 @@ pub fn status(app: &AppHandle) -> CaptureStatus {
         audio_errors: Vec::new(),
         last_clip: rec.last_clip.lock().unwrap().clone(),
         ffmpeg_pid: None,
+        waiting_for_game: g.is_none()
+            && rec.is_wanted()
+            && state.settings().capture.source == "auto",
+        game: rec.game.lock().unwrap().as_ref().map(|g| g.name()),
     };
     if let Some(s) = g.as_ref() {
         let ring = s.ring.lock().unwrap();
@@ -561,6 +643,7 @@ pub fn spawn_monitor(app: AppHandle) {
                 }
             }
             if let Some(e) = died {
+                eprintln!("[capture] ffmpeg died: {e}");
                 *rec.last_error.lock().unwrap() = Some(format!("Захват прервался: {e}"));
                 // Не больше 3 перезапусков в минуту (смена разрешения в игре, переключение fullscreen…).
                 let allow = {
@@ -569,7 +652,10 @@ pub fn spawn_monitor(app: AppHandle) {
                     r.push(Instant::now());
                     r.len() <= 3
                 };
-                if allow && rec.wanted.load(Ordering::Relaxed) {
+                // В режиме «авто» без живой игры перезапуск не нужен — следящий поток дождётся новой.
+                let game_ok = state.settings().capture.source != "auto"
+                    || rec.game.lock().unwrap().as_ref().map_or(false, |g| super::games::alive(g.pid));
+                if allow && game_ok && rec.wanted.load(Ordering::Relaxed) {
                     let _ = start(&app);
                 }
                 crate::shell::refresh_tray(&app);
@@ -606,6 +692,11 @@ pub async fn capture_stop(app: AppHandle) -> CaptureStatus {
 #[tauri::command]
 pub fn capture_status(app: AppHandle) -> CaptureStatus {
     status(&app)
+}
+
+#[tauri::command]
+pub fn capture_recent(state: State<'_, AppState>) -> Vec<ClipSaved> {
+    state.recorder.recent.lock().unwrap().clone()
 }
 
 #[tauri::command]

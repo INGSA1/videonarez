@@ -16,6 +16,8 @@ pub struct AppState {
     pub settings_path: Mutex<Option<PathBuf>>,
     /// Фоновый захват и буфер повтора.
     pub recorder: crate::capture::recorder::Recorder,
+    /// Пакетная очередь экспорта.
+    pub queue: crate::editor::queue::Queue,
 }
 
 impl AppState {

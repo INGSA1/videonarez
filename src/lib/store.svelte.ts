@@ -11,6 +11,7 @@ import type {
   ExportOptions,
   ExportProgress,
   ExportResult,
+  Job,
   Segment,
   Settings,
   Thumb,
@@ -51,8 +52,11 @@ export const app = $state({
   exporting: false,
   progress: { percent: 0, stage: "", current: 0, total: 0 } as ExportProgress,
   result: null as ExportResult | null,
+  queue: [] as Job[],
+  currentJob: null as number | null,
+  autostart: false,
 
-  tab: "clips" as "clips" | "export",
+  tab: "clips" as "clips" | "export" | "queue",
   showSettings: false,
   dragOver: false,
 
@@ -100,12 +104,17 @@ export async function init() {
   });
   await listen<ClipSaved>("clip-saved", (e) => {
     app.cap.recent.unshift(e.payload);
-    if (app.cap.recent.length > 30) app.cap.recent.pop();
+    if (app.cap.recent.length > 50) app.cap.recent.pop();
     toast(`${e.payload.kind === "replay" ? "Повтор" : "Запись"} сохранён(а): ${e.payload.path.split(/[\\/]/).pop()}`);
   });
   await listen<string>("capture-error", (e) => {
     app.error = e.payload;
   });
+  await listen<Job[]>("queue-update", (e) => onQueue(e.payload));
+  invoke<Job[]>("queue_list").then(onQueue).catch(() => {});
+  // История клипов хранится в ядре — переживает закрытие окна в трей.
+  invoke<ClipSaved[]>("capture_recent").then((r) => (app.cap.recent = r)).catch(() => {});
+  invoke<boolean>("get_autostart").then((v) => (app.autostart = v)).catch(() => {});
 
   try {
     app.settings = await invoke<Settings>("get_settings");
@@ -444,23 +453,62 @@ export async function startExport() {
     },
   };
   player.el?.pause();
-  app.exporting = true;
   app.result = null;
   app.error = "";
-  app.progress = { percent: 0, stage: "Подготовка", current: 0, total: segments.length };
+  const busy = app.queue.some((j) => j.status === "running" || j.status === "queued");
+  const label = `${m.fileName} · ${segments.length > 1 ? `${segments.length} клипа(ов)` : "1 клип"}`;
   try {
-    app.result = await invoke<ExportResult>("trim_and_export", { req });
+    const id = await invoke<number>("queue_add", { req, label });
+    app.currentJob = id;
+    app.exporting = true;
+    if (!busy) app.progress = { percent: 0, stage: "Подготовка", current: 0, total: segments.length };
+    else toast("Добавлено в очередь экспорта");
   } catch (e) {
-    const msg = String(e);
-    if (!msg.includes("Отменено")) app.error = msg;
-    else toast("Экспорт отменён");
-  } finally {
-    app.exporting = false;
+    app.error = String(e);
   }
 }
 
-export function cancelExport() {
-  void invoke("cancel_export");
+/** Обновление очереди: следим за заданием текущего файла, чтобы показать его результат. */
+function onQueue(list: Job[]) {
+  const prevRunning = app.queue.find((j) => j.status === "running")?.id;
+  app.queue = list;
+  const nowRunning = list.find((j) => j.status === "running")?.id;
+  if (nowRunning !== undefined && nowRunning !== prevRunning) {
+    app.progress = { percent: 0, stage: "Подготовка", current: 0, total: 0 };
+  }
+  const cur = list.find((j) => j.id === app.currentJob);
+  if (!cur) {
+    app.exporting = false;
+    return;
+  }
+  app.exporting = cur.status === "queued" || cur.status === "running";
+  if (cur.status === "done") {
+    app.result = { files: cur.files, notes: cur.notes, elapsedSec: cur.elapsedSec };
+    app.currentJob = null;
+  } else if (cur.status === "failed") {
+    app.error = cur.error ?? "Ошибка экспорта";
+    app.currentJob = null;
+  } else if (cur.status === "cancelled") {
+    toast("Экспорт отменён");
+    app.currentJob = null;
+  }
+}
+
+export function cancelExport(id?: number) {
+  const target = id ?? app.currentJob;
+  if (target != null) void invoke("queue_cancel", { id: target });
+}
+
+export function clearQueue() {
+  void invoke("queue_clear");
+}
+
+export async function setAutostart(enabled: boolean) {
+  try {
+    app.autostart = await invoke<boolean>("set_autostart", { enabled });
+  } catch (e) {
+    app.error = String(e);
+  }
 }
 
 export function reveal(path: string) {
@@ -489,7 +537,7 @@ async function capCall<T>(cmd: string, args?: Record<string, unknown>): Promise<
 }
 
 export async function captureToggle() {
-  const running = app.cap.status?.running;
+  const running = app.cap.status?.running || app.cap.status?.waitingForGame;
   const st = await capCall<CaptureStatus>(running ? "capture_stop" : "capture_start");
   if (st) app.cap.status = st;
 }

@@ -212,7 +212,7 @@ pub fn cancel_export(state: State<'_, AppState>) {
     }
 }
 
-async fn export(
+pub(crate) async fn export(
     app: &AppHandle,
     state: &AppState,
     req: &TrimRequest,

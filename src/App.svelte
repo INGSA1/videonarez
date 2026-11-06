@@ -11,6 +11,7 @@
   import ExportPanel from "./components/ExportPanel.svelte";
   import SettingsModal from "./components/SettingsModal.svelte";
   import CapturePanel from "./components/CapturePanel.svelte";
+  import QueuePanel from "./components/QueuePanel.svelte";
   import Icon from "./components/Icon.svelte";
   import { fmtTime } from "./lib/format";
 
@@ -41,6 +42,7 @@
   });
 
   const cst = $derived(app.cap.status);
+  const activeJobs = $derived(app.queue.filter((j) => j.status === "queued" || j.status === "running").length);
 
   function onKey(e: KeyboardEvent) {
     const tag = (e.target as HTMLElement)?.tagName;
@@ -90,7 +92,7 @@
     <nav class="modes">
       <button class:on={app.mode === "editor"} onclick={() => (app.mode = "editor")}><Icon name="scissors" size={14} /> Редактор</button>
       <button class:on={app.mode === "capture"} onclick={() => (app.mode = "capture")}>
-        <span class="cdot" class:live={cst?.running} class:rec={cst?.recordingSecs != null}></span> Захват
+        <span class="cdot" class:live={cst?.running} class:wait={cst?.waitingForGame} class:rec={cst?.recordingSecs != null}></span> Захват
         {#if cst?.recordingSecs != null}<span class="mono rec-t">{fmtTime(cst.recordingSecs, 0)}</span>
         {:else if cst?.running}<span class="mono dim">{Math.floor(cst.bufferedSecs)} с</span>{/if}
       </button>
@@ -143,12 +145,17 @@
           Клипы {#if app.segments.length}<span class="badge">{app.segments.length}</span>{/if}
         </button>
         <button class:on={app.tab === "export"} onclick={() => (app.tab = "export")}>Экспорт</button>
+        <button class:on={app.tab === "queue"} onclick={() => (app.tab = "queue")}>
+          Очередь {#if activeJobs}<span class="badge">{activeJobs}</span>{/if}
+        </button>
       </nav>
       <div class="side-body">
         {#if app.tab === "clips"}
           <SegmentList />
-        {:else}
+        {:else if app.tab === "export"}
           <ExportPanel />
+        {:else}
+          <QueuePanel />
         {/if}
       </div>
       {#if app.tab === "clips" && app.meta}
@@ -231,6 +238,9 @@
   }
   .cdot.live {
     background: var(--ok);
+  }
+  .cdot.wait {
+    background: var(--warn);
   }
   .cdot.rec {
     background: var(--accent-2);

@@ -19,6 +19,7 @@
         "minWidth": 1000,
         "minHeight": 640,
         "dragDropEnabled": true,
+        "visible": false,
         "backgroundColor": "#0d0e12",
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --enable-features=PlatformHEVCDecoderSupport"
       }

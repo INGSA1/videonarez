@@ -28,6 +28,8 @@ pub fn show_main(app: &AppHandle) {
     if let Some(cfg) = app.config().app.windows.first() {
         match WebviewWindowBuilder::from_config(app, cfg).and_then(|b| b.build()) {
             Ok(w) => {
+                // В конфиге окно скрыто (чтобы запуск в трей не мигал окном) — показываем явно.
+                let _ = w.show();
                 let _ = w.set_focus();
             }
             Err(e) => eprintln!("cannot create window: {e}"),
@@ -57,8 +59,8 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             "buffer" => {
                 let app = app.clone();
                 std::thread::spawn(move || {
-                    let running = app.state::<AppState>().recorder.session.lock().unwrap().is_some();
-                    if running {
+                    let armed = app.state::<AppState>().recorder.is_wanted();
+                    if armed {
                         recorder::stop(&app);
                     } else if let Err(e) = recorder::start(&app) {
                         let _ = app.emit("capture-error", e.to_string());
@@ -95,7 +97,8 @@ pub fn refresh_tray(app: &AppHandle) {
     let st = recorder::status(app);
     let cs = app.state::<AppState>().settings().capture;
     if let Some(items) = app.try_state::<TrayItems>() {
-        let _ = items.buffer.set_text(if st.running { "Выключить буфер повтора" } else { "Включить буфер повтора" });
+        let armed = st.running || st.waiting_for_game;
+        let _ = items.buffer.set_text(if armed { "Выключить буфер повтора" } else { "Включить буфер повтора" });
         let _ = items.save.set_enabled(st.running);
         let save_label = if cs.hotkey_save.is_empty() {
             "Сохранить повтор".to_string()
@@ -109,7 +112,12 @@ pub fn refresh_tray(app: &AppHandle) {
         let tip = if st.recording_secs.is_some() {
             "Videonarez — идёт запись".to_string()
         } else if st.running {
-            format!("Videonarez — буфер повтора {} с", st.max_secs as u32)
+            match &st.game {
+                Some(g) => format!("Videonarez — буфер {} с · {g}", st.max_secs as u32),
+                None => format!("Videonarez — буфер повтора {} с", st.max_secs as u32),
+            }
+        } else if st.waiting_for_game {
+            "Videonarez — ожидание игры".to_string()
         } else {
             "Videonarez".to_string()
         };

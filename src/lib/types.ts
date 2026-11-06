@@ -70,7 +70,8 @@ export interface Settings {
 }
 
 export interface CaptureSettings {
-  source: "monitor" | "window";
+  source: "monitor" | "window" | "auto";
+  gameExclude: string[];
   monitor: number;
   windowExe: string;
   windowTitle: string;
@@ -90,6 +91,7 @@ export interface CaptureSettings {
   autoStart: boolean;
   sound: boolean;
   closeToTray: boolean;
+  amfDirect: boolean;
 }
 
 export interface CaptureStatus {
@@ -110,6 +112,23 @@ export interface CaptureStatus {
   audioErrors: string[];
   lastClip: string | null;
   ffmpegPid: number | null;
+  waitingForGame: boolean;
+  game: string | null;
+}
+
+export type JobStatus = "queued" | "running" | "done" | "failed" | "cancelled";
+
+export interface Job {
+  id: number;
+  label: string;
+  input: string;
+  segments: number;
+  mode: TrimMode;
+  status: JobStatus;
+  files: string[];
+  notes: string[];
+  error: string | null;
+  elapsedSec: number;
 }
 
 export interface MonitorInfo {

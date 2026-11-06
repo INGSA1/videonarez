@@ -81,7 +81,7 @@ pub fn candidates(t: &Target, s: &CaptureSettings, enc: &EncoderInfo) -> Vec<Can
 
     // 1. Zero-copy для конкретного вендора.
     match (enc.vendor.as_str(), t) {
-        ("amf", Target::Monitor(m)) => {
+        ("amf", Target::Monitor(m)) if s.amf_direct => {
             let (w, h) = out_size(m.width, m.height, s.height);
             let scale = if (w, h) != (even(m.width), even(m.height)) {
                 format!(",vpp_amf=w={w}:h={h}")
@@ -149,7 +149,8 @@ pub fn encoder_args(enc: &EncoderInfo, kbps: u32, fps: u32) -> Vec<String> {
     match enc.vendor.as_str() {
         // usage=lowlatency у AMF игнорирует -g и выдаёт один IDR на весь поток — буфер нельзя резать.
         "amf" => {
-            push(&mut a, &["-usage", "transcoding", "-quality", "balanced", "-rc", "vbr_peak"]);
+            // quality=speed: меньше нагрузка на GPU, который делится с игрой (в игре balanced терял кадры).
+            push(&mut a, &["-usage", "transcoding", "-quality", "speed", "-rc", "vbr_peak"]);
             push(&mut a, &["-header_insertion_mode", "idr", "-forced_idr", "1"]);
         }
         "nvenc" => push(&mut a, &["-preset", "p4", "-tune", "ll", "-rc", "vbr", "-forced-idr", "1"]),
@@ -178,7 +179,8 @@ pub fn build_args(
     let fps = s.fps.clamp(10, 240);
     let kbps = (s.bitrate_mbps.clamp(1.0, 150.0) * 1000.0) as u32;
     let mut a: Vec<String> = Vec::new();
-    push(&mut a, &["-hide_banner", "-nostdin", "-loglevel", "error"]);
+    // Без -nostdin: остановка идёт командой «q» в stdin, чтобы FFmpeg сам освободил энкодер и захват.
+    push(&mut a, &["-hide_banner", "-loglevel", "error"]);
     push(&mut a, &[
         "-filter_complex",
         &format!("{},setpts=(RTCTIME-{t0_unix_us})/(TB*1000000)[v]", c.graph),
