@@ -15,23 +15,6 @@ use error::AppResult;
 use state::AppState;
 use tauri::{Manager, RunEvent, State};
 
-/// После обновления Windows продолжает показывать на ярлыках старую иконку из кэша значков:
-/// exe заменён по тому же пути. При первом запуске новой версии просим оболочку перечитать значки.
-fn refresh_icons_after_update(app: &tauri::AppHandle) {
-    let Ok(dir) = app.path().app_config_dir() else { return };
-    let marker = dir.join("last_version");
-    let ver = app.package_info().version.to_string();
-    if std::fs::read_to_string(&marker).map(|v| v.trim() == ver).unwrap_or(false) {
-        return;
-    }
-    let _ = std::fs::write(&marker, &ver);
-    #[cfg(windows)]
-    unsafe {
-        use windows::Win32::UI::Shell::{SHChangeNotify, SHCNE_ASSOCCHANGED, SHCNF_IDLIST};
-        SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None);
-    }
-}
-
 /// Показать файл в проводнике.
 #[tauri::command]
 fn reveal_in_explorer(path: String) -> AppResult<()> {
@@ -123,7 +106,6 @@ fn main() {
         })
         .setup(|app| {
             config::settings::init(app.handle())?;
-            refresh_icons_after_update(app.handle());
             shell::setup_tray(app.handle())?;
             for e in shell::register_hotkeys(app.handle()) {
                 eprintln!("hotkey: {e}");

@@ -347,9 +347,9 @@ fn try_start(
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     // Приоритет на видеокарте: без него игра без ограничения FPS забирает GPU целиком.
     let gpu_priority = super::gpu_priority::raise(child.id());
-    // Захват не должен замедляться энергосбережением Windows, когда окна свёрнуты.
+    // Звук захватывается в нашем процессе — он не должен замедляться энергосбережением Windows,
+    // когда окно свёрнуто. ffmpeg окон не имеет, и свёрнутое окно на него не влияет (проверено).
     super::gpu_priority::no_power_throttling(0);
-    super::gpu_priority::no_power_throttling(child.id());
     eprintln!("[capture] GPU priority: {}", gpu_priority.unwrap_or("не изменён"));
 
     let ring = Arc::new(Mutex::new(Ring::new(cs.buffer_secs.clamp(5, 1800) as f64)));
