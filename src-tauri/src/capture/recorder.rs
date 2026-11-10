@@ -292,7 +292,8 @@ fn start_inner(app: &AppHandle) -> AppResult<()> {
     }
     if cs.mic {
         let id = (!cs.mic_device.is_empty()).then(|| cs.mic_device.clone());
-        audio.push((AudioSource::Mic(id), "Микрофон".into()));
+        let fx = super::audio::MicFx { noise: cs.mic_noise_suppression, echo: cs.mic_echo_cancel };
+        audio.push((AudioSource::Mic(id, fx), "Микрофон".into()));
     }
 
     let mut errors = Vec::new();
@@ -451,8 +452,12 @@ pub fn stop_session(app: &AppHandle) {
 
 // ---------- Сохранение ----------
 
-fn output_dir(app: &AppHandle) -> PathBuf {
-    PathBuf::from(app.state::<AppState>().settings().output_dir)
+/// Повторы из буфера — в «Клипы», целые записи (Alt+F9) — в «Записи».
+fn clips_dir(app: &AppHandle) -> PathBuf {
+    app.state::<AppState>().settings().clips_dir()
+}
+fn recordings_dir(app: &AppHandle) -> PathBuf {
+    app.state::<AppState>().settings().recordings_dir()
 }
 
 fn unique(dir: &Path, stem: &str, ext: &str) -> PathBuf {
@@ -522,7 +527,7 @@ pub fn save_replay(app: &AppHandle, secs: Option<f64>) -> AppResult<()> {
         let (data, dur) = ring.snapshot(secs).ok_or_else(|| AppError::msg("Буфер ещё пуст"))?;
         (data, dur, s.prefix.clone(), s.tracks_for(dur))
     };
-    let dir = output_dir(app);
+    let dir = clips_dir(app);
     std::fs::create_dir_all(&dir)?;
     let app = app.clone();
     std::thread::spawn(move || {
@@ -579,7 +584,7 @@ pub fn toggle_record(app: &AppHandle) -> AppResult<bool> {
             let tracks = stopped.as_ref().map(|(_, d)| s.tracks_for(*d)).unwrap_or_default();
             (stopped, tracks)
         } else {
-            let dir = output_dir(app);
+            let dir = recordings_dir(app);
             std::fs::create_dir_all(&dir)?;
             let stem = format!("{}_{}", s.prefix, sources::local_stamp());
             ring.start_recording(unique(&dir, &stem, "ts"))?;

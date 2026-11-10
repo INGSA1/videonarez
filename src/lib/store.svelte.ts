@@ -313,7 +313,10 @@ let seekRaf = 0;
 export function seek(t: number) {
   const m = app.meta;
   if (!m) return;
-  t = clamp(t, 0, m.duration);
+  // Курсор всегда внутри выделения: перемотка, шаг по кадрам и щелчок по затемнённой
+  // части ленты упираются в границы обрезки. Расширить отрезок можно ручками.
+  const r = curRange();
+  t = clamp(t, Math.max(0, r.start), Math.min(m.duration, r.end));
   app.currentTime = t;
   seekPending = t;
   if (!seekRaf) {
@@ -330,8 +333,15 @@ export function togglePlay() {
   const el = player.el;
   if (!el || !app.src) return;
   app.playRange = false;
-  if (el.paused) void el.play().catch(() => {});
-  else el.pause();
+  if (el.paused) {
+    // Дошли до конца выделения (или курсор вне его) — играем отрезок сначала.
+    const r = curRange();
+    if (el.currentTime >= r.end - 0.04 || el.currentTime < r.start) {
+      el.currentTime = r.start;
+      app.currentTime = r.start;
+    }
+    void el.play().catch(() => {});
+  } else el.pause();
 }
 
 export function playRange() {
@@ -458,6 +468,12 @@ export function exportSegments() {
     : [{ start: app.inPoint, end: app.outPoint, name: null }];
 }
 
+/** Нарезки сохраняются рядом с повторами, в подпапку «Клипы»; целые записи — в «Записи». */
+export function clipsDir() {
+  const root = app.settings?.outputDir ?? "";
+  return root ? `${root.replace(/[\\/]+$/, "")}\\Клипы` : root;
+}
+
 export async function startExport() {
   const m = app.meta;
   const st = app.settings;
@@ -471,7 +487,7 @@ export async function startExport() {
     merge: o.merge && segments.length > 1,
     mode: o.mode,
     container: o.container,
-    outputDir: st.outputDir,
+    outputDir: clipsDir(),
     baseName: app.baseName || "clip",
     encode: {
       encoder: o.encoder,

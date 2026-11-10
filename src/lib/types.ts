@@ -85,6 +85,8 @@ export interface CaptureSettings {
   appAudioOnly: boolean;
   mic: boolean;
   micDevice: string;
+  micNoiseSuppression: boolean;
+  micEchoCancel: boolean;
   audioApps: string[];
   audioOffsetMs: number;
   hotkeySave: string;

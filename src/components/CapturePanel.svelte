@@ -236,6 +236,14 @@
             <option value="">Микрофон по умолчанию</option>
             {#each src?.mics ?? [] as m (m.id)}<option value={m.id}>{m.name}</option>{/each}
           </select>
+          <div class="sub">
+            <label class="check"><input type="checkbox" checked={d.micNoiseSuppression} onchange={(e) => set("micNoiseSuppression", e.currentTarget.checked)} /> Шумоподавление</label>
+            <label class="check"><input type="checkbox" checked={d.micEchoCancel} onchange={(e) => set("micEchoCancel", e.currentTarget.checked)} /> Эхоподавление</label>
+          </div>
+          <p class="hint">
+            Шумоподавление убирает гул, вентилятор и клавиатуру. Эхоподавление нужно, если играете без наушников:
+            оно вычитает из микрофона звук колонок.
+          </p>
         {/if}
         <label class="row">
           <span>Сдвиг звука, мс</span>
@@ -549,6 +557,11 @@
     gap: 8px;
     color: var(--text);
     font-size: 13px;
+  }
+  .sub {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
   }
   .apps-head {
     display: flex;

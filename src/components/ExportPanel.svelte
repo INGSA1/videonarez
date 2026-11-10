@@ -1,6 +1,6 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
-  import { app, startExport, cancelExport, reveal, applyPreset, exportSegments, saveSettings, copyForDiscord } from "../lib/store.svelte";
+  import { app, startExport, cancelExport, reveal, applyPreset, exportSegments, saveSettings, copyForDiscord, clipsDir } from "../lib/store.svelte";
   import { PRESETS, HEIGHTS, VERTICAL_HEIGHTS, FPS_OPTIONS, cropRect } from "../lib/presets";
   import { fmtTime, fmtBytes, fmtDur } from "../lib/format";
   import Icon from "./Icon.svelte";
@@ -261,8 +261,8 @@
 
   <section>
     <h3 class="h">Папка</h3>
-    <button class="dir" onclick={pickDir} title={app.settings?.outputDir}>
-      <Icon name="folder" /> <span class="path">{app.settings?.outputDir ?? "—"}</span>
+    <button class="dir" onclick={pickDir} title="Выбрать общую папку Videonarez. Клипы сохраняются в её подпапку «Клипы», целые записи в «Записи».">
+      <Icon name="folder" /> <span class="path">{clipsDir() || "—"}</span>
     </button>
   </section>
 
@@ -430,13 +430,17 @@
     direction: rtl;
     text-align: left;
   }
+  /* Прилипает к самому низу прокручиваемой панели: отступ панели (16px) уходит внутрь
+     подвала, иначе под кнопкой просвечивало содержимое, прокрученное под неё. */
   .footer {
     position: sticky;
-    bottom: 0;
+    bottom: -16px;
     display: grid;
     gap: 10px;
-    padding: 12px 0 2px;
+    margin: 0 -16px -16px;
+    padding: 12px 16px 16px;
     background: var(--panel);
+    border-top: 1px solid var(--line);
   }
   .summary {
     font-size: 12px;

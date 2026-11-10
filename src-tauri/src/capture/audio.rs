@@ -27,8 +27,8 @@ pub enum AudioSource {
     System,
     /// Только указанный процесс и его дочерние процессы.
     Process(u32),
-    /// Микрофон: ID устройства или устройство по умолчанию.
-    Mic(Option<String>),
+    /// Микрофон: ID устройства или устройство по умолчанию, плюс обработка голоса.
+    Mic(Option<String>, MicFx),
     /// Приложение по имени exe (Discord, браузер…). Процесс может запуститься позже или
     /// перезапуститься — дорожка ждёт его тишиной и подхватывает заново.
     App(String),
@@ -239,7 +239,7 @@ fn capture(
             .get_default_device(&Direction::Render)?
             .get_iaudioclient()?,
         AudioSource::Process(pid) => AudioClient::new_application_loopback_client(*pid, true)?,
-        AudioSource::Mic(id) => {
+        AudioSource::Mic(id, _) => {
             let en = DeviceEnumerator::new()?;
             match id {
                 Some(id) if !id.is_empty() => en.get_device(id)?,
@@ -264,6 +264,13 @@ fn capture(
 
     let mut q: VecDeque<u8> = VecDeque::with_capacity(RATE as usize * BYTES_PER_FRAME / 10);
     let mut last_check = Instant::now();
+    // Обработка голоса: пакеты микрофона сначала копятся в `raw`, а в дорожку уходит
+    // уже очищенный звук кадрами по 10 мс.
+    let mut fx = match source {
+        AudioSource::Mic(_, f) if f.noise || f.echo => Some(MicProc::new(*f)),
+        _ => None,
+    };
+    let mut raw: VecDeque<u8> = VecDeque::new();
     while !stop.load(Ordering::Relaxed) {
         if let Some(pid) = watch_pid {
             if last_check.elapsed() > Duration::from_secs(1) {
@@ -275,22 +282,141 @@ fn capture(
             }
         }
         let _ = event.wait_for_event(20); // таймаут = тишина, это нормально
+        let dst = if fx.is_some() { &mut raw } else { &mut q };
         while let Some(n) = cap.get_next_packet_size()? {
             if n == 0 {
                 break;
             }
-            let before = q.len();
-            let info = cap.read_from_device_to_deque(&mut q)?;
+            let before = dst.len();
+            let info = cap.read_from_device_to_deque(dst)?;
             if info.flags.silent {
-                for b in q.range_mut(before..) {
+                for b in dst.range_mut(before..) {
                     *b = 0;
                 }
             }
+        }
+        if let Some(p) = fx.as_mut() {
+            p.process(&mut raw, &mut q);
         }
         clock.pad(out, &mut q)?;
     }
     let _ = client.stop_stream();
     Ok(())
+}
+
+/// Обработка голоса в дорожке микрофона.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MicFx {
+    /// Шумоподавление: вентилятор, клавиатура, фоновый гул.
+    pub noise: bool,
+    /// Эхоподавление: убирает из микрофона звук игры и собеседников, попавший из колонок.
+    pub echo: bool,
+}
+
+/// 10 мс при 48 кГц — размер кадра обработки WebRTC.
+const FX_FRAME: usize = RATE as usize / 100;
+
+/// Шумо- и эхоподавление WebRTC (sonora). Для эхоподавления нужен образец того, что играет
+/// в колонках: открывается loopback устройства вывода по умолчанию, и каждый его кадр
+/// подаётся в обработку до соответствующего кадра микрофона.
+struct MicProc {
+    apm: sonora::AudioProcessing,
+    /// Моно-сэмплы микрофона, ещё не набравшие кадр.
+    cap: Vec<f32>,
+    /// Моно-сэмплы колонок для эхоподавления.
+    ren: Vec<f32>,
+    loopback: Option<(AudioClient, wasapi::AudioCaptureClient)>,
+    ren_raw: VecDeque<u8>,
+    out_frame: Vec<f32>,
+}
+
+impl MicProc {
+    fn new(fx: MicFx) -> Self {
+        use sonora::config::{EchoCanceller, HighPassFilter, NoiseSuppression, NoiseSuppressionLevel};
+        let config = sonora::Config {
+            high_pass_filter: Some(HighPassFilter::default()),
+            echo_canceller: fx.echo.then(EchoCanceller::default),
+            noise_suppression: fx.noise.then(|| NoiseSuppression { level: NoiseSuppressionLevel::High, ..Default::default() }),
+            ..Default::default()
+        };
+        let sc = sonora::StreamConfig::new(RATE, 1);
+        let apm = sonora::AudioProcessing::builder().config(config).capture_config(sc).render_config(sc).build();
+        let loopback = if fx.echo { open_loopback().map_err(|e| eprintln!("эхоподавление без образца колонок: {e}")).ok() } else { None };
+        MicProc {
+            apm,
+            cap: Vec::with_capacity(FX_FRAME * 4),
+            ren: Vec::with_capacity(FX_FRAME * 4),
+            loopback,
+            ren_raw: VecDeque::new(),
+            out_frame: vec![0.0; FX_FRAME],
+        }
+    }
+
+    /// Забирает сырые стерео-байты микрофона из `raw`, кладёт обработанные в `q`.
+    fn process(&mut self, raw: &mut VecDeque<u8>, q: &mut VecDeque<u8>) {
+        // Сначала всё, что успело прозвучать в колонках, — эхоподавлению нужен образец заранее.
+        if let Some((_, lc)) = &self.loopback {
+            while let Ok(Some(n)) = lc.get_next_packet_size() {
+                if n == 0 || lc.read_from_device_to_deque(&mut self.ren_raw).is_err() {
+                    break;
+                }
+            }
+            downmix(&mut self.ren_raw, &mut self.ren);
+            let mut off = 0;
+            while self.ren.len() - off >= FX_FRAME {
+                let _ = self.apm.process_render_f32(&[&self.ren[off..off + FX_FRAME]], &mut [&mut self.out_frame[..]]);
+                off += FX_FRAME;
+            }
+            self.ren.drain(..off);
+        }
+        downmix(raw, &mut self.cap);
+        let mut off = 0;
+        while self.cap.len() - off >= FX_FRAME {
+            if self.apm.process_capture_f32(&[&self.cap[off..off + FX_FRAME]], &mut [&mut self.out_frame[..]]).is_err() {
+                self.out_frame.copy_from_slice(&self.cap[off..off + FX_FRAME]);
+            }
+            for &s in &self.out_frame {
+                let b = s.clamp(-1.0, 1.0).to_le_bytes();
+                q.extend(b);
+                q.extend(b);
+            }
+            off += FX_FRAME;
+        }
+        self.cap.drain(..off);
+    }
+}
+
+impl Drop for MicProc {
+    fn drop(&mut self) {
+        if let Some((c, _)) = &self.loopback {
+            let _ = c.stop_stream();
+        }
+    }
+}
+
+/// Стерео f32 (байты) → моно, целые кадры; хвост неполного кадра остаётся в `raw`.
+fn downmix(raw: &mut VecDeque<u8>, mono: &mut Vec<f32>) {
+    let frames = raw.len() / BYTES_PER_FRAME;
+    let bytes: Vec<u8> = raw.drain(..frames * BYTES_PER_FRAME).collect();
+    for f in bytes.chunks_exact(BYTES_PER_FRAME) {
+        let l = f32::from_le_bytes([f[0], f[1], f[2], f[3]]);
+        let r = f32::from_le_bytes([f[4], f[5], f[6], f[7]]);
+        mono.push((l + r) * 0.5);
+    }
+}
+
+/// Loopback устройства вывода по умолчанию — образец звука колонок для эхоподавления.
+fn open_loopback() -> Result<(AudioClient, wasapi::AudioCaptureClient), Box<dyn std::error::Error>> {
+    let fmt = WaveFormat::new(32, 32, &SampleType::Float, RATE as usize, CH, None);
+    let mut client = DeviceEnumerator::new()?.get_default_device(&Direction::Render)?.get_iaudioclient()?;
+    client.initialize_client(
+        &fmt,
+        &Direction::Capture,
+        &StreamMode::PollingShared { autoconvert: true, buffer_duration_hns: 1_000_000 },
+    )?;
+    let cap = client.get_audiocaptureclient()?;
+    client.start_stream()?;
+    Ok((client, cap))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -409,4 +535,68 @@ pub fn list_inputs() -> Vec<AudioDevice> {
         Ok(v)
     };
     run().unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Шумоподавление: длина потока сохраняется, ровный шум заметно тише.
+    #[test]
+    fn noise_suppression_keeps_length_and_quiets_noise() {
+        let mut p = MicProc::new(MicFx { noise: true, echo: false });
+        let mut seed = 12345u32;
+        let mut noise = || {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            ((seed >> 9) as f32 / (1u32 << 23) as f32 - 0.5) * 0.1
+        };
+        let (mut in_e, mut out_e, mut out_n) = (0.0f64, 0.0f64, 0usize);
+        let mut q = VecDeque::new();
+        for chunk in 0..300 {
+            // куски по 7 мс, не кратные кадру обработки
+            let mut raw = VecDeque::new();
+            for _ in 0..336 {
+                let s = noise();
+                if chunk >= 150 {
+                    in_e += (s * s) as f64;
+                }
+                raw.extend(s.to_le_bytes());
+                raw.extend(s.to_le_bytes());
+            }
+            q.clear();
+            p.process(&mut raw, &mut q);
+            let b: Vec<u8> = q.iter().copied().collect();
+            for f in b.chunks_exact(8) {
+                let s = f32::from_le_bytes([f[0], f[1], f[2], f[3]]);
+                if chunk >= 150 {
+                    out_e += (s * s) as f64;
+                }
+                out_n += 1;
+            }
+        }
+        assert!(out_n >= 300 * 336 - FX_FRAME && out_n <= 300 * 336, "кадров: {out_n}");
+        assert!(out_e < in_e * 0.5, "шум не приглушён: {in_e} -> {out_e}");
+    }
+
+    /// Эхоподавление на настоящих устройствах: loopback колонок открывается, микрофон
+    /// обрабатывается кадрами без ошибок. Запуск: cargo test -- --ignored echo_live
+    #[test]
+    #[ignore]
+    fn echo_live() {
+        initialize_mta().ok().unwrap();
+        let mut p = MicProc::new(MicFx { noise: true, echo: true });
+        assert!(p.loopback.is_some(), "loopback колонок не открылся");
+        let t = Instant::now();
+        let mut q = VecDeque::new();
+        let mut n = 0usize;
+        while t.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(10));
+            let mut raw: VecDeque<u8> = std::iter::repeat(0u8).take(480 * BYTES_PER_FRAME).collect();
+            p.process(&mut raw, &mut q);
+            n += q.len() / BYTES_PER_FRAME;
+            q.clear();
+        }
+        println!("обработано кадров: {n}, остаток колонок: {}", p.ren.len());
+        assert!(n > 0);
+    }
 }

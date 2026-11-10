@@ -67,6 +67,10 @@ pub struct CaptureSettings {
     pub audio_apps: Vec<String>,
     /// ID устройства, "" = микрофон по умолчанию.
     pub mic_device: String,
+    /// Шумоподавление микрофона (WebRTC NS).
+    pub mic_noise_suppression: bool,
+    /// Эхоподавление микрофона (WebRTC AEC3, образец — звук колонок).
+    pub mic_echo_cancel: bool,
     /// Сдвиг звука относительно видео (мс, плюс = позже).
     pub audio_offset_ms: i32,
     pub hotkey_save: String,
@@ -101,6 +105,8 @@ impl Default for CaptureSettings {
             mic: false,
             audio_apps: Vec::new(),
             mic_device: String::new(),
+            mic_noise_suppression: true,
+            mic_echo_cancel: false,
             audio_offset_ms: 0,
             hotkey_save: "Alt+F10".into(),
             hotkey_record: "Alt+F9".into(),
@@ -109,6 +115,19 @@ impl Default for CaptureSettings {
             close_to_tray: true,
             amf_direct: false,
         }
+    }
+}
+
+/// Внутри общей папки клипы (повторы и нарезки) и целые записи лежат раздельно.
+pub const CLIPS_SUBDIR: &str = "Клипы";
+pub const RECORDINGS_SUBDIR: &str = "Записи";
+
+impl Settings {
+    pub fn clips_dir(&self) -> std::path::PathBuf {
+        std::path::Path::new(&self.output_dir).join(CLIPS_SUBDIR)
+    }
+    pub fn recordings_dir(&self) -> std::path::PathBuf {
+        std::path::Path::new(&self.output_dir).join(RECORDINGS_SUBDIR)
     }
 }
 

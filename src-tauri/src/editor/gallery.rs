@@ -33,14 +33,23 @@ pub struct ClipPreview {
 
 const EXT: &[&str] = &["mp4", "mkv", "mov", "webm"];
 
+/// Папки раздела галереи: "recordings" — целые записи; иначе клипы. Старые файлы, лежащие
+/// прямо в общей папке (до разделения на подпапки), показываются среди клипов.
+fn dirs_for(state: &AppState, kind: &str) -> Vec<PathBuf> {
+    let s = state.settings();
+    if kind == "recordings" {
+        vec![s.recordings_dir()]
+    } else {
+        vec![s.clips_dir(), PathBuf::from(&s.output_dir)]
+    }
+}
+
 #[tauri::command]
-pub fn list_clips(state: State<'_, AppState>, limit: usize) -> AppResult<Vec<ClipFile>> {
-    let dir = PathBuf::from(state.settings().output_dir);
-    let Ok(rd) = std::fs::read_dir(&dir) else {
-        return Ok(Vec::new());
-    };
-    let mut v: Vec<ClipFile> = rd
-        .flatten()
+pub fn list_clips(state: State<'_, AppState>, limit: usize, kind: Option<String>) -> AppResult<Vec<ClipFile>> {
+    let mut v: Vec<ClipFile> = dirs_for(&state, kind.as_deref().unwrap_or("clips"))
+        .iter()
+        .filter_map(|d| std::fs::read_dir(d).ok())
+        .flat_map(|rd| rd.flatten())
         .filter_map(|e| {
             let p = e.path();
             let ext = p.extension()?.to_string_lossy().to_lowercase();
@@ -126,8 +135,8 @@ pub async fn clip_preview(app: AppHandle, path: String) -> AppResult<ClipPreview
 
 /// Открыть папку клипов в проводнике.
 #[tauri::command]
-pub fn open_clips_folder(state: State<'_, AppState>) -> AppResult<()> {
-    let dir = state.settings().output_dir;
+pub fn open_clips_folder(state: State<'_, AppState>, kind: Option<String>) -> AppResult<()> {
+    let dir = dirs_for(&state, kind.as_deref().unwrap_or("clips")).remove(0);
     std::fs::create_dir_all(&dir)?;
     std::process::Command::new("explorer").arg(&dir).spawn()?;
     Ok(())

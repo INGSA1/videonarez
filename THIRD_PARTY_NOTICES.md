@@ -20,4 +20,7 @@ Videonarez распространяется по лицензии GNU GPL вер
 Приложение собрано на Tauri, Svelte и библиотеках Rust и npm (лицензии MIT, Apache-2.0 и совместимые с GPL-3.0).
 Полный список зависимостей — в `src-tauri/Cargo.lock` и `package-lock.json`.
 
+Шумо- и эхоподавление микрофона: библиотека sonora (https://github.com/dignifiedquire/sonora), перенос
+WebRTC Audio Processing на Rust. Лицензия BSD-3-Clause; Copyright (c) The WebRTC project authors и авторы sonora.
+
 Шрифты Golos Text и Unbounded распространяются по лицензии SIL Open Font License 1.1.

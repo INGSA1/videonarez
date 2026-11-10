@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { openInEditor, reveal, copyForDiscord } from "../lib/store.svelte";
@@ -20,10 +21,20 @@
   let clips = $state<ClipFile[]>([]);
   let previews = $state<Record<string, Preview>>({});
   let loaded = $state(false);
+  // Клипы (повторы и нарезки) и целые записи лежат в разных папках и показываются раздельно.
+  let kind = $state<"clips" | "recordings">("clips");
+
+  function show(k: "clips" | "recordings") {
+    if (k === kind) return;
+    kind = k;
+    loaded = false;
+    clips = [];
+    void refresh();
+  }
 
   async function refresh() {
     try {
-      clips = await invoke<ClipFile[]>("list_clips", { limit: 24 });
+      clips = await invoke<ClipFile[]>("list_clips", { limit: 24, kind });
     } catch {
       clips = [];
     }
@@ -55,9 +66,14 @@
   }
 
   $effect(() => {
-    void refresh();
+    untrack(() => void refresh());
     let un: (() => void) | undefined;
-    listen("clip-saved", () => refresh()).then((u) => (un = u));
+    listen<{ kind: string }>("clip-saved", (e) => {
+      // Сохранили запись, пока открыты клипы (или наоборот) — переключаемся на её раздел.
+      const k = e.payload?.kind === "recording" ? "recordings" : "clips";
+      if (k !== kind) show(k);
+      else void refresh();
+    }).then((u) => (un = u));
     return () => un?.();
   });
 
@@ -83,13 +99,18 @@
 
 <section class="gallery">
   <header>
-    <h3 class="h">Клипы</h3>
-    <button class="ghost" onclick={() => invoke("open_clips_folder")}><Icon name="folder" size={14} /> Открыть папку</button>
+    <div class="tabs" role="tablist">
+      <button role="tab" class="tab" class:active={kind === "clips"} aria-selected={kind === "clips"} onclick={() => show("clips")}>Клипы</button>
+      <button role="tab" class="tab" class:active={kind === "recordings"} aria-selected={kind === "recordings"} onclick={() => show("recordings")}>Записи</button>
+    </div>
+    <button class="ghost" onclick={() => invoke("open_clips_folder", { kind })}><Icon name="folder" size={14} /> Открыть папку</button>
   </header>
 
   {#if loaded && !clips.length}
     <p class="empty">
-      Здесь появятся сохранённые повторы и записи. Включите буфер и нажмите горячую клавишу сохранения во время игры.
+      {kind === "clips"
+        ? "Здесь появятся повторы и нарезанные клипы. Включите буфер и нажмите горячую клавишу сохранения во время игры."
+        : "Здесь появятся целые записи. Запись начинается и останавливается горячей клавишей записи."}
     </p>
   {:else}
     <div class="grid">
@@ -130,6 +151,28 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+  }
+  .tabs {
+    display: flex;
+    gap: 18px;
+  }
+  .tab {
+    padding: 2px 0 6px;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    color: var(--text-3);
+    font-weight: 600;
+    font-size: 13px;
+  }
+  .tab:hover:not(:disabled) {
+    background: none;
+    color: var(--text);
+  }
+  .tab.active {
+    color: var(--text);
+    border-bottom-color: var(--cue, #f5c518);
   }
   .empty {
     margin: 0;

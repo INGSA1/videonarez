@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { app, player, curRange, onVideoError, togglePlay, step, skip, setIn, setOut, playRange, addSegment } from "../lib/store.svelte";
+  import { untrack } from "svelte";
+  import { app, player, curRange, onVideoError, togglePlay, step, skip, setIn, setOut, playRange, addSegment, seek } from "../lib/store.svelte";
   import { cropRect } from "../lib/presets";
   import { fmtTime, clamp } from "../lib/format";
   import Icon from "./Icon.svelte";
@@ -85,13 +86,17 @@
     if (!video) return;
     app.currentTime = video.currentTime;
     mixer?.sync(video.currentTime);
-    if (app.playRange) {
+    {
+      // Воспроизведение не выходит за выделение: на его конце останавливаемся.
       const r = curRange();
       if (video.currentTime >= r.end) {
         video.pause();
         app.playRange = false;
         video.currentTime = r.end;
         app.currentTime = r.end;
+      } else if (video.currentTime < r.start - 0.05) {
+        video.currentTime = r.start;
+        app.currentTime = r.start;
       }
     }
     if (!video.paused) raf = requestAnimationFrame(loop);
@@ -132,6 +137,13 @@
   }
 
   const range = $derived(curRange());
+
+  // Выделение поменялось (выбрали другой клип, сдвинули границу) — курсор возвращается внутрь.
+  $effect(() => {
+    const r = range;
+    const t = untrack(() => app.currentTime);
+    if (app.meta && (t < r.start || t > r.end)) untrack(() => seek(t));
+  });
 </script>
 
 <div class="player">

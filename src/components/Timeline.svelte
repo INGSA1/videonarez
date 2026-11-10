@@ -8,6 +8,7 @@
   const THUMB = 50;
   const GAP = 3;
   const LANE = 18;
+  const HANDLE = 14;
   const TOP_T = RULER;
   const TOP_W = RULER + THUMB + GAP;
   // Звук: одна дорожка — общая волна; несколько — по полосе на каждую.
@@ -170,10 +171,11 @@
         ctx.font = FONT_UI;
         const w = ctx.measureText(label).width + 10;
         ctx.fillStyle = "rgba(27,28,30,0.85)";
-        ctx.fillRect(4, y0 + 3, w, 15);
+        // отступ слева, чтобы подпись не пряталась под ручкой начала
+        ctx.fillRect(HANDLE + 6, y0 + 3, w, 15);
         ctx.fillStyle = on ? C.segText : C.tickText;
         ctx.textBaseline = "middle";
-        ctx.fillText(label, 9, y0 + 11);
+        ctx.fillText(label, HANDLE + 11, y0 + 11);
       }
     }
     const wf = app.waveform;
@@ -233,17 +235,36 @@
     ctx.fillStyle = "rgba(245,197,24,0.6)";
     ctx.fillRect(xi, RULER - 3, xo - xi, 3);
     ctx.strokeStyle = C.accent;
-    ctx.lineWidth = 2;
-    ctx.strokeRect(xi, TOP_T + 1, xo - xi, BODY_H - 2);
+    ctx.lineWidth = 3;
+    ctx.strokeRect(xi + 1.5, TOP_T + 1.5, Math.max(0, xo - xi - 3), BODY_H - 3);
+    // Ручки рисуются внутри выделения: у краёв ленты (весь ролик выделен) они раньше
+    // уходили за край холста и были не видны.
+    const hw = Math.max(4, Math.min(HANDLE, (xo - xi) / 2));
     for (const [hx, dir] of [[xi, -1], [xo, 1]] as const) {
-      const x = dir < 0 ? hx - 9 : hx;
+      const x = dir < 0 ? hx : hx - hw;
       ctx.fillStyle = C.accent;
       ctx.beginPath();
-      ctx.roundRect(x, TOP_T, 9, BODY_H, dir < 0 ? [5, 0, 0, 5] : [0, 5, 5, 0]);
+      ctx.roundRect(x, TOP_T, hw, BODY_H, dir < 0 ? [6, 0, 0, 6] : [0, 6, 6, 0]);
       ctx.fill();
-      ctx.fillStyle = "rgba(0,0,0,0.45)";
-      ctx.fillRect(x + 3, TOP_T + BODY_H / 2 - 8, 1, 16);
-      ctx.fillRect(x + 5, TOP_T + BODY_H / 2 - 8, 1, 16);
+      // Насечки-«хват» и стрелка, куда тянуть
+      ctx.fillStyle = "rgba(27,28,30,0.7)";
+      const cx = x + hw / 2;
+      if (hw >= 10) {
+        ctx.fillRect(Math.round(cx) - 2, TOP_T + BODY_H / 2 - 9, 1.5, 18);
+        ctx.fillRect(Math.round(cx) + 1, TOP_T + BODY_H / 2 - 9, 1.5, 18);
+        ctx.beginPath();
+        const ay = TOP_T + 10;
+        if (dir < 0) {
+          ctx.moveTo(cx + 3, ay - 4);
+          ctx.lineTo(cx - 2, ay);
+          ctx.lineTo(cx + 3, ay + 4);
+        } else {
+          ctx.moveTo(cx - 3, ay - 4);
+          ctx.lineTo(cx + 2, ay);
+          ctx.lineTo(cx - 3, ay + 4);
+        }
+        ctx.fill();
+      }
     }
   }
 
@@ -309,8 +330,9 @@
     const r = curRange();
     const xi = t2x(r.start);
     const xo = t2x(r.end);
-    if (x >= xi - 11 && x <= xi + 3) return "in";
-    if (x >= xo - 3 && x <= xo + 11) return "out";
+    const hw = Math.max(4, Math.min(HANDLE, (xo - xi) / 2));
+    if (x >= xi - 6 && x <= xi + hw + 2) return "in";
+    if (x >= xo - hw - 2 && x <= xo + 6) return "out";
     return null;
   }
 
@@ -365,8 +387,14 @@
       return;
     }
     const t = x2t(clamp(x, 0, width));
-    if (drag.kind === "in") setIn(t);
-    else if (drag.kind === "out") setOut(t);
+    // Тянем границу — курсор едет вместе с ней, в плеере виден кадр, по которому режем.
+    if (drag.kind === "in") {
+      setIn(t);
+      seek(curRange().start);
+    } else if (drag.kind === "out") {
+      setOut(t);
+      seek(curRange().end);
+    }
     else if (drag.kind === "scrub") seek(t);
     else {
       const s = drag.v0.end - drag.v0.start;
