@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getCurrentWebview } from "@tauri-apps/api/webview";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import {
     app, init, openFileDialog, openPath, togglePlay, step, skip, setIn, setOut, addSegment,
     removeSegment, playRange, startExport, scheduleSave, player, VIDEO_EXT, installUpdate,
@@ -16,6 +17,17 @@
   import Timecode from "./components/Timecode.svelte";
 
   let timeline: Timeline | undefined = $state();
+
+  // Системной рамки нет: шапка приложения — это и есть заголовок окна (как в Discord).
+  const win = getCurrentWindow();
+  let maximized = $state(false);
+  $effect(() => {
+    const sync = () => win.isMaximized().then((m) => (maximized = m)).catch(() => {});
+    sync();
+    let un: (() => void) | undefined;
+    win.onResized(sync).then((u) => (un = u));
+    return () => un?.();
+  });
 
   $effect(() => {
     void init();
@@ -98,8 +110,8 @@
 <svelte:window onkeydown={onKey} />
 
 <div class="shell">
-  <header class="top">
-    <span class="wordmark">videonarez</span>
+  <header class="top" data-tauri-drag-region>
+    <span class="wordmark" data-tauri-drag-region>videonarez</span>
 
     <nav class="modes" aria-label="Режим">
       <button class:on={app.mode === "editor"} onclick={() => (app.mode = "editor")}>Редактор</button>
@@ -112,17 +124,32 @@
 
     {#if app.mode === "editor"}
       {#if app.meta}
-        <div class="file">
-          <span class="name" title={app.meta.path}>{app.meta.fileName}</span>
-          <span class="facts">{fileFacts}{#if app.usingProxy}<span class="proxy" title="Формат не воспроизводится напрямую. Экспорт всё равно идёт из оригинала."> Предпросмотр через облегчённую копию</span>{/if}</span>
+        <div class="file" data-tauri-drag-region>
+          <span class="name" title={app.meta.path} data-tauri-drag-region>{app.meta.fileName}</span>
+          <span class="facts" data-tauri-drag-region>{fileFacts}{#if app.usingProxy}<span class="proxy" title="Формат не воспроизводится напрямую. Экспорт всё равно идёт из оригинала."> Предпросмотр через облегчённую копию</span>{/if}</span>
         </div>
       {/if}
-      <div class="spacer"></div>
+      <div class="spacer" data-tauri-drag-region></div>
       <button onclick={openFileDialog} title="Ctrl+O"><Icon name="open" /> Открыть видео</button>
     {:else}
-      <div class="spacer"></div>
+      <div class="spacer" data-tauri-drag-region></div>
     {/if}
     <button class="ghost icon" title="Настройки" onclick={() => (app.showSettings = true)}><Icon name="gear" size={17} /></button>
+    <div class="winctl">
+      <button title="Свернуть" aria-label="Свернуть" onclick={() => win.minimize()}>
+        <svg width="10" height="10" viewBox="0 0 10 10"><path d="M0 5.5h10" stroke="currentColor" /></svg>
+      </button>
+      <button title={maximized ? "Восстановить" : "Развернуть"} aria-label={maximized ? "Восстановить" : "Развернуть"} onclick={() => win.toggleMaximize()}>
+        {#if maximized}
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2.5 2.5V.5h7v7h-2M.5 2.5h7v7h-7z" stroke="currentColor" /></svg>
+        {:else}
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M.5.5h9v9h-9z" stroke="currentColor" /></svg>
+        {/if}
+      </button>
+      <button class="close" title="Закрыть" aria-label="Закрыть" onclick={() => win.close()}>
+        <svg width="10" height="10" viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10" stroke="currentColor" stroke-width="1.1" /></svg>
+      </button>
+    </div>
   </header>
 
   {#if app.update.info && !app.update.dismissed}
@@ -217,11 +244,36 @@
     display: flex;
     align-items: center;
     gap: 18px;
-    padding: 0 12px 0 18px;
+    padding: 0 0 0 18px;
     height: 48px;
     background: var(--panel);
     border-bottom: 1px solid var(--line);
     flex-shrink: 0;
+    user-select: none;
+  }
+  /* Кнопки окна в стиле Windows: во всю высоту шапки, «закрыть» краснеет при наведении. */
+  .winctl {
+    display: flex;
+    align-self: stretch;
+    margin-left: -6px;
+  }
+  .winctl button {
+    width: 46px;
+    height: 100%;
+    padding: 0;
+    justify-content: center;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    color: var(--text-2);
+  }
+  .winctl button:hover:not(:disabled) {
+    background: var(--panel-3);
+    color: var(--text);
+  }
+  .winctl .close:hover:not(:disabled) {
+    background: #c42b1c;
+    color: #fff;
   }
   .wordmark {
     font-family: var(--tc);
