@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Иконка Videonarez: две жёлтые ручки обрезки (как на ленте редактора) выше кадра,
+       между ними выделенный отрезок и кнопка воспроизведения. Палитра интерфейса. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a2b2f"/>
+      <stop offset="1" stop-color="#16171a"/>
+    </linearGradient>
+  </defs>
+  <rect x="32" y="32" width="960" height="960" rx="216" fill="url(#bg)"/>
+  <rect x="33" y="33" width="958" height="958" rx="215" fill="none" stroke="#ffffff" stroke-opacity="0.07" stroke-width="2"/>
+  <!-- выделенный отрезок: верхняя и нижняя кромки -->
+  <rect x="250" y="344" width="524" height="30" fill="#f5c518"/>
+  <rect x="250" y="650" width="524" height="30" fill="#f5c518"/>
+  <!-- ручки обрезки, выше и ниже кадра -->
+  <rect x="176" y="236" width="104" height="552" rx="38" fill="#f5c518"/>
+  <rect x="744" y="236" width="104" height="552" rx="38" fill="#f5c518"/>
+  <rect x="213" y="452" width="11" height="120" rx="5.5" fill="#1b1c1e" fill-opacity="0.55"/>
+  <rect x="232" y="452" width="11" height="120" rx="5.5" fill="#1b1c1e" fill-opacity="0.55"/>
+  <rect x="781" y="452" width="11" height="120" rx="5.5" fill="#1b1c1e" fill-opacity="0.55"/>
+  <rect x="800" y="452" width="11" height="120" rx="5.5" fill="#1b1c1e" fill-opacity="0.55"/>
+  <!-- воспроизведение -->
+  <path d="M446 418 Q446 396 466 408 L606 494 Q626 512 606 530 L466 616 Q446 628 446 606 Z" fill="#e6e4df"/>
+</svg>
