@@ -1,6 +1,6 @@
 [package]
 name = "videonarez"
-version = "0.2.4"
+version = "0.2.5"
 description = "Лёгкий видео-нарезчик клипов и хайлайтов (Tauri v2 + FFmpeg)"
 license = "GPL-3.0-or-later"
 edition = "2021"
