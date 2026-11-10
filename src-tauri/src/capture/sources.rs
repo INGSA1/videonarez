@@ -180,8 +180,32 @@ pub fn local_stamp() -> String {
     )
 }
 
+/// Звук сохранения клипа, вшит в программу (WAV, 0,84 с).
+static CLIP_SAVED_WAV: &[u8] = include_bytes!("../../sounds/clip_saved.wav");
+
+/// Сигнал «клип сохранён»: проигрывается асинхронно, захват не ждёт.
+/// Если звук не запустился, звучит системный сигнал.
 pub fn beep() {
+    use windows::core::PCWSTR;
+    use windows::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_MEMORY, SND_NODEFAULT};
     unsafe {
-        let _ = MessageBeep(MB_ICONASTERISK);
+        let ok = PlaySoundW(PCWSTR(CLIP_SAVED_WAV.as_ptr() as *const u16), None, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
+        if !ok.as_bool() {
+            let _ = MessageBeep(MB_ICONASTERISK);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Проигрывает звук сохранения. Запуск: cargo test -- --ignored clip_sound
+    #[test]
+    #[ignore]
+    fn clip_sound() {
+        use windows::core::PCWSTR;
+        use windows::Win32::Media::Audio::{PlaySoundW, SND_MEMORY, SND_NODEFAULT};
+        // синхронно, чтобы тест дождался конца звука
+        let ok = unsafe { PlaySoundW(PCWSTR(super::CLIP_SAVED_WAV.as_ptr() as *const u16), None, SND_MEMORY | SND_NODEFAULT) };
+        assert!(ok.as_bool());
     }
 }
