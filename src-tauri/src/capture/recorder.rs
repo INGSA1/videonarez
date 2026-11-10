@@ -347,6 +347,9 @@ fn try_start(
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     // Приоритет на видеокарте: без него игра без ограничения FPS забирает GPU целиком.
     let gpu_priority = super::gpu_priority::raise(child.id());
+    // Захват не должен замедляться энергосбережением Windows, когда окна свёрнуты.
+    super::gpu_priority::no_power_throttling(0);
+    super::gpu_priority::no_power_throttling(child.id());
     eprintln!("[capture] GPU priority: {}", gpu_priority.unwrap_or("не изменён"));
 
     let ring = Arc::new(Mutex::new(Ring::new(cs.buffer_secs.clamp(5, 1800) as f64)));
@@ -657,6 +660,11 @@ pub fn status(app: &AppHandle) -> CaptureStatus {
             .zip(&s.tracks)
             .filter_map(|(e, t)| e.lock().unwrap().as_ref().map(|e| format!("{t}: {e}")))
             .collect();
+        for (feed, t) in s._audio.iter().zip(&s.tracks) {
+            if let Some(secs) = feed.stuck_secs() {
+                st.audio_errors.push(format!("{t}: Windows не отдаёт звук уже {secs:.0} с, дорожка пишется тишиной"));
+            }
+        }
         if let Some(e) = &ring.rec_error {
             st.error = Some(format!("Ошибка записи на диск: {e}"));
         }
@@ -818,4 +826,40 @@ pub async fn capture_apply_settings(
         .map_err(|e| AppError::msg(e.to_string()))??;
     }
     Ok(hotkey_errors)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Тот же путь, что в приложении (try_start: звук по TCP → FFmpeg → кольцевой буфер),
+    /// печатает частоту кадров каждые 5 с. Запуск: cargo test --release -- --ignored live_fps --nocapture
+    #[test]
+    #[ignore]
+    fn live_fps() {
+        let secs: u64 = std::env::var("LIVE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(120);
+        let cs = CaptureSettings { mic: true, ..Default::default() };
+        let (_g, monitors) = sources::gpu_and_monitors();
+        let target = Target::Monitor(monitors[0].clone());
+        let enc = EncoderInfo { name: "h264_amf".into(), vendor: "amf".into(), codec: "h264".into(), hardware: true };
+        let audio = vec![
+            (AudioSource::System, "Системный звук".to_string()),
+            (AudioSource::App("Discord.exe".into()), "Discord".into()),
+            (AudioSource::App("Яндекс Музыка.exe".into()), "Яндекс Музыка".into()),
+            (AudioSource::Mic(None, super::super::audio::MicFx { noise: true, echo: false }), "Микрофон".into()),
+        ];
+        let cand = candidates(&target, &cs, &enc).into_iter().find(|c| c.label.starts_with("DXGI")).unwrap();
+        println!("цепочка: {}", cand.label);
+        let sess = try_start(&cand, &enc, &cs, &target, &audio).unwrap();
+        let start = Instant::now();
+        let mut last = (0u64, Instant::now());
+        while start.elapsed() < Duration::from_secs(secs) {
+            std::thread::sleep(Duration::from_secs(5));
+            let frames = sess.ring.lock().unwrap().frames;
+            let dt = last.1.elapsed().as_secs_f64();
+            println!("{:>4} с: {:.1} кадров/с", start.elapsed().as_secs(), (frames - last.0) as f64 / dt);
+            last = (frames, Instant::now());
+        }
+        drop(sess);
+    }
 }

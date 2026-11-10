@@ -67,6 +67,8 @@ pub struct AudioFeed {
     pub port: u16,
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+    writer: Option<JoinHandle<()>>,
+    sink: Arc<Sink>,
     pub error: Arc<Mutex<Option<String>>>,
     t0: Instant,
     /// Когда в дорожке последний раз был слышимый звук (мс от t0, 0 — ни разу).
@@ -91,55 +93,75 @@ impl AudioFeed {
         let port = listener.local_addr()?.port();
         let stop = Arc::new(AtomicBool::new(false));
         let error = Arc::new(Mutex::new(None));
-        let (stop2, error2) = (stop.clone(), error.clone());
+        let error2 = error.clone();
         let last_sound = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let last2 = last_sound.clone();
+        let sink = Arc::new(Sink {
+            buf: Mutex::new(VecDeque::new()),
+            closed: AtomicBool::new(false),
+            activating: Mutex::new(None),
+        });
+
+        // Поток отправки: держит дорожку в FFmpeg строго в реальном времени по своим часам.
+        // Если захват подвис (Windows долго подключает звук перезапущенного приложения,
+        // меняется устройство), сюда просто не приходят данные, и уходит тишина. Раньше
+        // отправка шла из потока захвата: пока он висел, FFmpeg ждал эту дорожку, и вместе
+        // с ней вставало видео — запись проседала до нескольких кадров в секунду.
+        let (stop_w, sink_w, last_w) = (stop.clone(), sink.clone(), last_sound.clone());
+        let writer = std::thread::Builder::new().name("audio-send".into()).spawn(move || {
+            let Some(mut stream) = accept(&listener, &stop_w) else {
+                sink_w.closed.store(true, Ordering::Relaxed);
+                return;
+            };
+            let _ = stream.set_nodelay(true);
+            let mut clock = Clock::new(t0, offset_secs, last_w);
+            let mut q: VecDeque<u8> = VecDeque::new();
+            while !stop_w.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(10));
+                q.extend(sink_w.buf.lock().unwrap().drain(..));
+                if clock.pad(&mut stream, &mut q).is_err() {
+                    break; // FFmpeg закрыл соединение
+                }
+            }
+            sink_w.closed.store(true, Ordering::Relaxed);
+        })?;
+
+        let (stop2, sink2) = (stop.clone(), sink.clone());
+        let done = move || stop2.load(Ordering::Relaxed) || sink2.closed.load(Ordering::Relaxed);
+        let sink2 = sink.clone();
         let handle = std::thread::Builder::new()
             .name("audio-capture".into())
             .spawn(move || {
-                let Some(mut stream) = accept(&listener, &stop2) else { return };
-                let _ = stream.set_nodelay(true);
-                let mut clock = Clock::new(t0, offset_secs, last2);
                 if let AudioSource::App(exe) = &source {
                     // Приложение: ждём процесс, пишем его звук, после закрытия снова ждём.
-                    while !stop2.load(Ordering::Relaxed) {
+                    while !done() {
                         match find_app_pid(exe) {
                             Some(pid) => {
-                                if let Err(e) = capture(&AudioSource::Process(pid), &mut stream, &stop2, &mut clock, Some(pid)) {
-                                    if is_closed(&e) {
-                                        return;
-                                    }
+                                if let Err(e) = capture(&AudioSource::Process(pid), &sink2, &done, Some(pid)) {
                                     *error2.lock().unwrap() = Some(e.to_string());
+                                    sleep_unless(&done, Duration::from_secs(1));
                                 }
                             }
-                            None => {
-                                // Нет процесса — 2 секунды тишины и снова ищем.
-                                let until = Instant::now() + Duration::from_secs(2);
-                                while Instant::now() < until && !stop2.load(Ordering::Relaxed) {
-                                    std::thread::sleep(Duration::from_millis(20));
-                                    if clock.pad(&mut stream, &mut VecDeque::new()).is_err() {
-                                        return;
-                                    }
-                                }
-                            }
+                            // Нет процесса — через 2 секунды ищем снова (тишину дописывает отправка).
+                            None => sleep_unless(&done, Duration::from_secs(2)),
                         }
                     }
                     return;
                 }
-                if let Err(e) = capture(&source, &mut stream, &stop2, &mut clock, None) {
-                    if !stop2.load(Ordering::Relaxed) {
+                if let Err(e) = capture(&source, &sink2, &done, None) {
+                    if !done() {
                         *error2.lock().unwrap() = Some(e.to_string());
                     }
                 }
-                // Устройство недоступно — держим дорожку тишиной, пока FFmpeg читает.
-                while !stop2.load(Ordering::Relaxed) {
-                    std::thread::sleep(Duration::from_millis(20));
-                    if clock.pad(&mut stream, &mut VecDeque::new()).is_err() {
-                        break;
-                    }
-                }
+                // Устройство недоступно — дорожка продолжается тишиной из потока отправки.
             })?;
-        Ok(AudioFeed { port, stop, handle: Some(handle), error, t0, last_sound })
+        Ok(AudioFeed { port, stop, handle: Some(handle), writer: Some(writer), error, t0, last_sound, sink })
+    }
+
+    /// Захват висит в подключении к устройству дольше 3 с — сколько секунд.
+    pub fn stuck_secs(&self) -> Option<f64> {
+        let since = (*self.sink.activating.lock().unwrap())?;
+        let s = since.elapsed().as_secs_f64();
+        (s > 3.0).then_some(s)
     }
 
     pub fn url(&self) -> String {
@@ -150,9 +172,42 @@ impl AudioFeed {
 impl Drop for AudioFeed {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(h) = self.handle.take() {
+        // Ждём только отправку (выходит за ~10 мс). Поток захвата не ждём: если он завис в
+        // подключении к устройству, остановка не должна зависнуть вместе с ним — он сам
+        // выйдет по флагу stop.
+        if let Some(h) = self.writer.take() {
             let _ = h.join();
         }
+        drop(self.handle.take());
+    }
+}
+
+/// Звук от потока захвата к потоку отправки.
+struct Sink {
+    buf: Mutex<VecDeque<u8>>,
+    /// FFmpeg отключился — захват можно заканчивать.
+    closed: AtomicBool,
+    /// С какого момента идёт подключение к устройству или процессу (None — не подключаемся).
+    activating: Mutex<Option<Instant>>,
+}
+
+impl Sink {
+    fn push(&self, q: &mut VecDeque<u8>) {
+        let mut b = self.buf.lock().unwrap();
+        b.extend(q.drain(..));
+        // Пока FFmpeg не подключился, держим не больше 2 секунд.
+        let max = RATE as usize * BYTES_PER_FRAME * 2;
+        if b.len() > max {
+            let cut = (b.len() - max) / BYTES_PER_FRAME * BYTES_PER_FRAME;
+            b.drain(..cut);
+        }
+    }
+}
+
+fn sleep_unless(done: &dyn Fn() -> bool, d: Duration) {
+    let until = Instant::now() + d;
+    while Instant::now() < until && !done() {
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -212,27 +267,27 @@ impl Clock {
     }
 }
 
-/// FFmpeg закрыл соединение (захват остановлен) — это не ошибка устройства.
-fn is_closed(e: &Box<dyn std::error::Error>) -> bool {
-    e.downcast_ref::<std::io::Error>().map_or(false, |io| {
-        matches!(
-            io.kind(),
-            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
-        )
-    })
-}
-
 /// `watch_pid` — для звука процесса: выйти (Ok), когда процесс завершится, чтобы
 /// вызывающий код переключился на тишину и дождался нового запуска приложения.
+/// `done` — пора заканчивать (захват остановлен или FFmpeg отключился).
 fn capture(
     source: &AudioSource,
-    out: &mut TcpStream,
-    stop: &AtomicBool,
-    clock: &mut Clock,
+    sink: &Sink,
+    done: &dyn Fn() -> bool,
     watch_pid: Option<u32>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     initialize_mta().ok()?;
     let fmt = WaveFormat::new(32, 32, &SampleType::Float, RATE as usize, CH, None);
+
+    // Подключение может зависнуть внутри Windows — помечаем его, чтобы показать в статусе.
+    *sink.activating.lock().unwrap() = Some(Instant::now());
+    struct Clear<'a>(&'a Sink);
+    impl Drop for Clear<'_> {
+        fn drop(&mut self) {
+            *self.0.activating.lock().unwrap() = None;
+        }
+    }
+    let activating = Clear(sink);
 
     let mut client = match source {
         AudioSource::System => DeviceEnumerator::new()?
@@ -261,6 +316,7 @@ fn capture(
     let event = client.set_get_eventhandle()?;
     let cap = client.get_audiocaptureclient()?;
     client.start_stream()?;
+    drop(activating);
 
     let mut q: VecDeque<u8> = VecDeque::with_capacity(RATE as usize * BYTES_PER_FRAME / 10);
     let mut last_check = Instant::now();
@@ -271,7 +327,7 @@ fn capture(
         _ => None,
     };
     let mut raw: VecDeque<u8> = VecDeque::new();
-    while !stop.load(Ordering::Relaxed) {
+    while !done() {
         if let Some(pid) = watch_pid {
             if last_check.elapsed() > Duration::from_secs(1) {
                 last_check = Instant::now();
@@ -298,7 +354,7 @@ fn capture(
         if let Some(p) = fx.as_mut() {
             p.process(&mut raw, &mut q);
         }
-        clock.pad(out, &mut q)?;
+        sink.push(&mut q);
     }
     let _ = client.stop_stream();
     Ok(())
@@ -598,5 +654,52 @@ mod tests {
         }
         println!("обработано кадров: {n}, остаток колонок: {}", p.ren.len());
         assert!(n > 0);
+    }
+
+    /// Скорость каждой звуковой дорожки: должна быть 48000 кадров/с, иначе FFmpeg ждёт её и
+    /// тормозит видео. Запуск: cargo test --release -- --ignored feed_rates --nocapture
+    #[test]
+    #[ignore]
+    fn feed_rates() {
+        use std::io::Read;
+        let srcs = vec![
+            ("система", AudioSource::System),
+            ("Discord", AudioSource::App("Discord.exe".into())),
+            ("Яндекс Музыка", AudioSource::App("Яндекс Музыка.exe".into())),
+            ("микрофон", AudioSource::Mic(None, MicFx { noise: true, echo: false })),
+            ("микрофон+эхо", AudioSource::Mic(None, MicFx { noise: true, echo: true })),
+        ];
+        let t0 = Instant::now();
+        let mut hs = Vec::new();
+        for (name, s) in srcs {
+            let feed = AudioFeed::start(s, t0, 0.0).unwrap();
+            let port = feed.port;
+            hs.push(std::thread::spawn(move || {
+                let mut sock = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                let start = Instant::now();
+                let mut buf = vec![0u8; 65536];
+                let mut total = 0usize;
+                let mut worst = Duration::ZERO;
+                let mut last = Instant::now();
+                sock.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+                while start.elapsed() < Duration::from_secs(10) {
+                    match sock.read(&mut buf) {
+                        Ok(n) if n > 0 => {
+                            total += n;
+                            worst = worst.max(last.elapsed());
+                            last = Instant::now();
+                        }
+                        _ => worst = worst.max(last.elapsed()),
+                    }
+                }
+                let rate = total as f64 / BYTES_PER_FRAME as f64 / start.elapsed().as_secs_f64();
+                let err = feed.error.lock().unwrap().clone();
+                println!("{name}: {rate:.0} кадров/с, самая длинная пауза {} мс, ошибка: {err:?}", worst.as_millis());
+                drop(feed);
+            }));
+        }
+        for h in hs {
+            h.join().unwrap();
+        }
     }
 }
