@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import { openInEditor, reveal } from "../lib/store.svelte";
+  import { openInEditor, reveal, copyForDiscord } from "../lib/store.svelte";
   import { fmtBytes, fmtTime } from "../lib/format";
   import Icon from "./Icon.svelte";
   import Timecode from "./Timecode.svelte";
@@ -112,6 +112,7 @@
               <span class="name" title={c.name}>{title(c.name)}</span>
               <span class="meta">{when(c.modified)}, {fmtBytes(c.sizeBytes)}</span>
             </div>
+            <button class="ghost icon" title="Скопировать файл, чтобы вставить в Discord через Ctrl+V" onclick={() => copyForDiscord(c.path)}><Icon name="copy" size={14} /></button>
             <button class="ghost icon" title="Показать в проводнике" onclick={() => reveal(c.path)}><Icon name="folder" size={14} /></button>
           </div>
         </article>

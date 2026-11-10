@@ -68,9 +68,22 @@ pub struct AudioFeed {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
     pub error: Arc<Mutex<Option<String>>>,
+    t0: Instant,
+    /// Когда в дорожке последний раз был слышимый звук (мс от t0, 0 — ни разу).
+    last_sound: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl AudioFeed {
+    /// Был ли в дорожке слышимый звук за последние `secs` секунд.
+    pub fn audible_within(&self, secs: f64) -> bool {
+        let last = self.last_sound.load(Ordering::Relaxed);
+        if last == 0 {
+            return false;
+        }
+        let now = self.t0.elapsed().as_millis() as u64;
+        now.saturating_sub(last) as f64 <= secs * 1000.0 + 500.0
+    }
+
     /// `t0` — общий для видео и звука момент начала шкалы времени,
     /// `offset_secs` — поправка синхронизации (плюс = звук позже).
     pub fn start(source: AudioSource, t0: Instant, offset_secs: f64) -> std::io::Result<AudioFeed> {
@@ -79,12 +92,14 @@ impl AudioFeed {
         let stop = Arc::new(AtomicBool::new(false));
         let error = Arc::new(Mutex::new(None));
         let (stop2, error2) = (stop.clone(), error.clone());
+        let last_sound = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let last2 = last_sound.clone();
         let handle = std::thread::Builder::new()
             .name("audio-capture".into())
             .spawn(move || {
                 let Some(mut stream) = accept(&listener, &stop2) else { return };
                 let _ = stream.set_nodelay(true);
-                let mut clock = Clock::new(t0, offset_secs);
+                let mut clock = Clock::new(t0, offset_secs, last2);
                 if let AudioSource::App(exe) = &source {
                     // Приложение: ждём процесс, пишем его звук, после закрытия снова ждём.
                     while !stop2.load(Ordering::Relaxed) {
@@ -124,7 +139,7 @@ impl AudioFeed {
                     }
                 }
             })?;
-        Ok(AudioFeed { port, stop, handle: Some(handle), error })
+        Ok(AudioFeed { port, stop, handle: Some(handle), error, t0, last_sound })
     }
 
     pub fn url(&self) -> String {
@@ -163,11 +178,12 @@ struct Clock {
     start: Instant,
     offset: f64,
     written: u64,
+    last_sound: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Clock {
-    fn new(start: Instant, offset: f64) -> Self {
-        Clock { start, offset, written: 0 }
+    fn new(start: Instant, offset: f64, last_sound: Arc<std::sync::atomic::AtomicU64>) -> Self {
+        Clock { start, offset, written: 0, last_sound }
     }
 
     /// Отдать накопленные сэмплы, удерживая дорожку на шкале реального времени.
@@ -183,6 +199,11 @@ impl Clock {
             q.drain(..extra * BYTES_PER_FRAME);
         }
         let (a, b) = q.as_slices();
+        // Слышимый звук: любой сэмпл громче примерно −66 дБ.
+        let loud = |s: &[u8]| s.chunks_exact(4).any(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]).abs() > 0.0005);
+        if loud(a) || loud(b) {
+            self.last_sound.store((self.start.elapsed().as_millis() as u64).max(1), Ordering::Relaxed);
+        }
         out.write_all(a)?;
         out.write_all(b)?;
         self.written += (q.len() / BYTES_PER_FRAME) as u64;

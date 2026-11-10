@@ -28,7 +28,8 @@
     zoomIn: "M10 3a7 7 0 1 0 4.2 12.6l5.6 5.6 1.4-1.4-5.6-5.6A7 7 0 0 0 10 3zm0 2a5 5 0 1 1 0 10 5 5 0 0 1 0-10zM9 7h2v2h2v2h-2v2H9v-2H7V9h2z",
     zoomOut: "M10 3a7 7 0 1 0 4.2 12.6l5.6 5.6 1.4-1.4-5.6-5.6A7 7 0 0 0 10 3zm0 2a5 5 0 1 1 0 10 5 5 0 0 1 0-10zM7 9h6v2H7z",
     fit: "M3 3h6v2H5v4H3zM15 3h6v6h-2V5h-4zM3 15h2v4h4v2H3zM19 15h2v6h-6v-2h4z",
-    crop: "M6 2v14a2 2 0 0 0 2 2h14v-2H8V2zM2 6h4v2H2zM16 22v-4h2v4zM10 6h6a2 2 0 0 1 2 2v6h-2V8h-6z",
+    copy: "M8 3h10a2 2 0 0 1 2 2v12h-2V5H8zM4 9a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2zm2 0v10h8V9z",
+    crop:"M6 2v14a2 2 0 0 0 2 2h14v-2H8V2zM2 6h4v2H2zM16 22v-4h2v4zM10 6h6a2 2 0 0 1 2 2v6h-2V8h-6z",
   };
 </script>
 

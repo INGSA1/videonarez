@@ -1,6 +1,6 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
-  import { app, startExport, cancelExport, reveal, applyPreset, exportSegments, saveSettings } from "../lib/store.svelte";
+  import { app, startExport, cancelExport, reveal, applyPreset, exportSegments, saveSettings, copyForDiscord } from "../lib/store.svelte";
   import { PRESETS, HEIGHTS, VERTICAL_HEIGHTS, FPS_OPTIONS, cropRect } from "../lib/presets";
   import { fmtTime, fmtBytes, fmtDur } from "../lib/format";
   import Icon from "./Icon.svelte";
@@ -301,6 +301,9 @@
           <button class="ghost file" onclick={() => reveal(f)} title="Показать в проводнике">
             <Icon name="folder" size={14} /> <span class="path">{f.split(/[\\/]/).pop()}</span>
           </button>
+          <button class="primary discord" onclick={() => copyForDiscord(f)} title="Кладёт файл в буфер обмена. В Discord нажмите Ctrl+V.">
+            Скопировать для Discord
+          </button>
         {/each}
         {#each app.result.notes as n (n)}<p class="note">{n}</p>{/each}
       </div>
@@ -454,6 +457,10 @@
   .progress {
     display: grid;
     gap: 6px;
+  }
+  .discord {
+    justify-content: center;
+    margin-bottom: 4px;
   }
   .qlink {
     justify-content: center;

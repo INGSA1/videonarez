@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { app, cancelExport, clearQueue, reveal, openInEditor } from "../lib/store.svelte";
+  import { app, cancelExport, clearQueue, reveal, openInEditor, copyForDiscord } from "../lib/store.svelte";
   import Icon from "./Icon.svelte";
   import type { JobStatus } from "../lib/types";
 
@@ -39,6 +39,7 @@
         {#each j.files as f (f)}
           <div class="file">
             <button class="ghost" onclick={() => reveal(f)} title="Показать в проводнике"><Icon name="folder" size={13} /> {fileName(f)}</button>
+            <button class="ghost icon" title="Скопировать файл, чтобы вставить в Discord через Ctrl+V" onclick={() => copyForDiscord(f)}><Icon name="copy" size={13} /></button>
             <button class="ghost icon" title="Открыть в редакторе" onclick={() => openInEditor(f)}><Icon name="scissors" size={13} /></button>
           </div>
         {/each}

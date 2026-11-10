@@ -25,7 +25,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use std::os::windows::process::CommandExt;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-const NORMAL_PRIORITY: u32 = 0x0000_0020;
+/// Захват идёт с приоритетом «выше среднего», как в OBS: работы у него мало, но если игра
+/// загрузит процессор целиком, захват не должен оставаться без времени.
+const ABOVE_NORMAL_PRIORITY: u32 = 0x0000_8000;
 const BELOW_NORMAL_PRIORITY: u32 = 0x0000_4000;
 
 pub struct Session {
@@ -43,6 +45,7 @@ pub struct Session {
     pub prefix: String,
     pub tracks: Vec<String>,
     pub ffmpeg_pid: u32,
+    pub gpu_priority: Option<&'static str>,
     stop_wait: Duration,
 }
 
@@ -73,6 +76,17 @@ fn stop_wait(graph: &str) -> Duration {
         Duration::from_millis(300)
     } else {
         Duration::from_secs(3)
+    }
+}
+
+impl Session {
+    /// Дорожки для клипа длиной `dur` секунд: молчавшие всё это время помечаются `None`.
+    fn tracks_for(&self, dur: f64) -> Vec<Option<String>> {
+        self.tracks
+            .iter()
+            .zip(&self._audio)
+            .map(|(name, feed)| feed.audible_within(dur).then(|| name.clone()))
+            .collect()
     }
 }
 
@@ -114,6 +128,8 @@ struct Stats {
     bytes: u64,
     fps: f64,
     kbps: f64,
+    /// Сколько секунд подряд полноэкранная игра на переднем плане, а кадров заметно меньше нужного.
+    low_secs: u32,
 }
 
 #[derive(Serialize, Clone)]
@@ -139,6 +155,10 @@ pub struct CaptureStatus {
     /// Режим «авто»: буфер взведён и ждёт полноэкранную игру.
     pub waiting_for_game: bool,
     pub game: Option<String>,
+    /// Приоритет захвата на видеокарте (None — не удалось поднять).
+    pub gpu_priority: Option<String>,
+    /// Предупреждение о нехватке кадров в игре.
+    pub warning: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -322,8 +342,11 @@ fn try_start(
     let mut cmd = Command::new(ffmpeg);
     cmd.args(&args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW | NORMAL_PRIORITY);
+    cmd.creation_flags(CREATE_NO_WINDOW | ABOVE_NORMAL_PRIORITY);
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    // Приоритет на видеокарте: без него игра без ограничения FPS забирает GPU целиком.
+    let gpu_priority = super::gpu_priority::raise(child.id());
+    eprintln!("[capture] GPU priority: {}", gpu_priority.unwrap_or("не изменён"));
 
     let ring = Arc::new(Mutex::new(Ring::new(cs.buffer_secs.clamp(5, 1800) as f64)));
     let mut stdout = child.stdout.take().unwrap();
@@ -382,6 +405,7 @@ fn try_start(
 
     Ok(Session {
         ffmpeg_pid: child.id(),
+        gpu_priority,
         child,
         ring,
         audio_errors: feeds.iter().map(|f| f.error.clone()).collect(),
@@ -415,7 +439,7 @@ pub fn stop_session(app: &AppHandle) {
     let sess = state.recorder.session.lock().unwrap().take();
     if let Some(s) = sess {
         let rec = s.ring.lock().unwrap().stop_recording();
-        let tracks = s.tracks.clone();
+        let tracks = rec.as_ref().map(|(_, d)| s.tracks_for(*d)).unwrap_or_default();
         drop(s); // убивает FFmpeg
         if let Some((ts, dur)) = rec {
             finish_recording(app, ts, dur, tracks);
@@ -443,15 +467,22 @@ fn unique(dir: &Path, stem: &str, ext: &str) -> PathBuf {
 }
 
 /// TS → MP4 без перекодирования, с названиями звуковых дорожек.
-fn remux(ts: &Path, mp4: &Path, tracks: &[String]) -> Result<(), String> {
+/// `tracks[i]` — название i-й звуковой дорожки потока, `None` — дорожку не сохранять
+/// (в ней за время клипа не было звука: приложение закрыто или молчало).
+fn remux(ts: &Path, mp4: &Path, tracks: &[Option<String>]) -> Result<(), String> {
     let ffmpeg = tools().map_err(|e| e.to_string())?.ffmpeg.clone();
     let mut cmd = Command::new(ffmpeg);
     cmd.args(["-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-i"]).arg(ts);
-    cmd.args(["-map", "0", "-c", "copy"]);
+    cmd.args(["-map", "0:v"]);
+    let mut k = 0;
     for (i, t) in tracks.iter().enumerate() {
-        cmd.arg(format!("-metadata:s:a:{i}")).arg(format!("title={t}"));
-        cmd.arg(format!("-metadata:s:a:{i}")).arg(format!("handler_name={t}"));
+        let Some(t) = t else { continue };
+        cmd.args(["-map", &format!("0:a:{i}")]);
+        cmd.arg(format!("-metadata:s:a:{k}")).arg(format!("title={t}"));
+        cmd.arg(format!("-metadata:s:a:{k}")).arg(format!("handler_name={t}"));
+        k += 1;
     }
+    cmd.args(["-c", "copy"]);
     cmd.args(["-movflags", "+faststart", "-f", "mp4"]).arg(mp4);
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
     #[cfg(windows)]
@@ -489,7 +520,7 @@ pub fn save_replay(app: &AppHandle, secs: Option<f64>) -> AppResult<()> {
         let ring = s.ring.lock().unwrap();
         let secs = secs.unwrap_or(ring.max_secs);
         let (data, dur) = ring.snapshot(secs).ok_or_else(|| AppError::msg("Буфер ещё пуст"))?;
-        (data, dur, s.prefix.clone(), s.tracks.clone())
+        (data, dur, s.prefix.clone(), s.tracks_for(dur))
     };
     let dir = output_dir(app);
     std::fs::create_dir_all(&dir)?;
@@ -514,7 +545,7 @@ pub fn save_replay(app: &AppHandle, secs: Option<f64>) -> AppResult<()> {
     Ok(())
 }
 
-fn finish_recording(app: &AppHandle, ts: PathBuf, dur: f64, tracks: Vec<String>) {
+fn finish_recording(app: &AppHandle, ts: PathBuf, dur: f64, tracks: Vec<Option<String>>) {
     let app = app.clone();
     std::thread::spawn(move || {
         let mp4 = ts.with_extension("mp4");
@@ -544,7 +575,9 @@ pub fn toggle_record(app: &AppHandle) -> AppResult<bool> {
         let s = g.as_ref().ok_or_else(|| AppError::msg("Захват не запущен"))?;
         let mut ring = s.ring.lock().unwrap();
         if ring.recording_secs().is_some() {
-            (ring.stop_recording(), s.tracks.clone())
+            let stopped = ring.stop_recording();
+            let tracks = stopped.as_ref().map(|(_, d)| s.tracks_for(*d)).unwrap_or_default();
+            (stopped, tracks)
         } else {
             let dir = output_dir(app);
             std::fs::create_dir_all(&dir)?;
@@ -591,6 +624,14 @@ pub fn status(app: &AppHandle) -> CaptureStatus {
             && rec.is_wanted()
             && state.settings().capture.source == "auto",
         game: rec.game.lock().unwrap().as_ref().map(|g| g.name()),
+        gpu_priority: None,
+        warning: (stats.low_secs >= 5).then(|| {
+            format!(
+                "В записи около {:.0} кадров/с из {}. Игра забирает видеокарту целиком: ограничьте её FPS в настройках игры (например, до 144).",
+                stats.fps,
+                state.settings().capture.fps
+            )
+        }),
     };
     if let Some(s) = g.as_ref() {
         let ring = s.ring.lock().unwrap();
@@ -604,6 +645,7 @@ pub fn status(app: &AppHandle) -> CaptureStatus {
         st.recording_secs = ring.recording_secs();
         st.uptime_secs = s.started.elapsed().as_secs_f64();
         st.ffmpeg_pid = Some(s.ffmpeg_pid);
+        st.gpu_priority = s.gpu_priority.map(String::from);
         st.audio_errors = s
             .audio_errors
             .iter()
@@ -651,13 +693,20 @@ pub fn spawn_monitor(app: AppHandle) {
                             st.fps = (frames - st.frames) as f64 / dt;
                             st.kbps = (bytes - st.bytes) as f64 * 8.0 / 1000.0 / dt;
                         }
+                        // Нехватка кадров считается, только когда на переднем плане полноэкранная игра:
+                        // на рабочем столе низкая частота — это просто неподвижная картинка.
+                        let cs = state.settings().capture;
+                        let starving = st.at.is_some()
+                            && st.fps < cs.fps as f64 * 0.6
+                            && super::games::foreground_fullscreen(&cs.game_exclude).is_some();
+                        st.low_secs = if starving { st.low_secs + 1 } else { 0 };
                         *st = Stats { at: Some(now), frames, bytes, ..*st };
                     }
                 }
                 if died.is_some() {
                     if let Some(s) = g.take() {
                         let rec_file = s.ring.lock().unwrap().stop_recording();
-                        let tracks = s.tracks.clone();
+                        let tracks = rec_file.as_ref().map(|(_, d)| s.tracks_for(*d)).unwrap_or_default();
                         drop(s);
                         if let Some((ts, dur)) = rec_file {
                             finish_recording(&app, ts, dur, tracks);

@@ -154,6 +154,7 @@
       </div>
 
       {#if st?.error}<p class="err">{st.error}</p>{/if}
+      {#if st?.warning}<p class="warn">{st.warning}</p>{/if}
       {#each st?.audioErrors ?? [] as e (e)}<p class="warn">Звук не захватывается. {e}</p>{/each}
     </section>
 

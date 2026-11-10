@@ -79,27 +79,64 @@ pub fn candidates(t: &Target, s: &CaptureSettings, enc: &EncoderInfo) -> Vec<Can
         }
     };
 
-    // 1. Zero-copy для конкретного вендора.
-    match (enc.vendor.as_str(), t) {
-        ("amf", Target::Monitor(m)) if s.amf_direct => {
-            let (w, h) = out_size(m.width, m.height, s.height);
-            let scale = if (w, h) != (even(m.width), even(m.height)) {
-                format!(",vpp_amf=w={w}:h={h}")
-            } else {
-                String::new()
-            };
+    let sw_fmt = match (enc.hardware, enc.vendor.as_str()) {
+        (true, "qsv") => ",format=nv12",
+        (true, _) => "",
+        (false, _) => ",format=yuv420p",
+    };
+
+    // Монитор по умолчанию пишется через DXGI Desktop Duplication, а не WGC.
+    // WGC отдаёт кадр, только когда Windows перерисовывает экран; видео в браузере идёт в обход
+    // этой перерисовки (аппаратный слой), и при неподвижной мыши запись проседала до 3–29 кадров/с.
+    // DXGI видит все обновления (замер: 57 кадров/с против 29 у WGC на ролике 60 кадров/с) и
+    // повторяет последний кадр, если экран стоит, — частота в файле всегда ровная.
+    if let Target::Monitor(m) = t {
+        let (w, h) = out_size(m.width, m.height, s.height);
+        let scaled = (w, h) != (even(m.width), even(m.height));
+        let dda = format!("ddagrab=output_idx={}:framerate={fps}", m.index);
+        if s.amf_direct && enc.vendor == "amf" {
+            let scale = if scaled { format!(",vpp_amf=w={w}:h={h}") } else { String::new() };
             v.push(Candidate {
                 label: "AMD AMF — захват и кодирование в видеопамяти".into(),
                 zero_copy: true,
                 graph: format!("vsrc_amf=monitor_index={}:framerate={fps}{scale}", m.index),
             });
         }
-        ("nvenc", _) => v.push(Candidate {
+        match enc.vendor.as_str() {
+            "nvenc" if !scaled => v.push(Candidate {
+                label: "DXGI → NVENC без копирования".into(),
+                zero_copy: true,
+                graph: dda.clone(),
+            }),
+            "qsv" if !scaled => v.push(Candidate {
+                label: "DXGI → QuickSync без копирования".into(),
+                zero_copy: true,
+                graph: format!("{dda},hwmap=derive_device=qsv,format=qsv"),
+            }),
+            _ => {}
+        }
+        let scale = if scaled { format!(",scale={w}:{h}:flags=fast_bilinear") } else { String::new() };
+        v.push(Candidate {
+            label: "DXGI Desktop Duplication".into(),
+            zero_copy: false,
+            graph: format!("{dda},hwdownload,format=bgra{scale}{sw_fmt}"),
+        });
+        v.push(Candidate {
+            label: "Windows.Graphics.Capture".into(),
+            zero_copy: false,
+            graph: format!("{gfx},hwdownload,format=bgra{sw_fmt}"),
+        });
+        return v;
+    }
+
+    // Окно: только WGC (DXGI умеет снимать лишь монитор целиком).
+    match enc.vendor.as_str() {
+        "nvenc" => v.push(Candidate {
             label: "NVENC — D3D11 без копирования".into(),
             zero_copy: true,
             graph: gfx.clone(),
         }),
-        ("qsv", _) => v.push(Candidate {
+        "qsv" => v.push(Candidate {
             label: "QuickSync — D3D11 без копирования".into(),
             zero_copy: true,
             graph: format!("{gfx},hwmap=derive_device=qsv,format=qsv"),
@@ -107,32 +144,11 @@ pub fn candidates(t: &Target, s: &CaptureSettings, enc: &EncoderInfo) -> Vec<Can
         _ => {}
     }
 
-    // 2. Универсальный путь: WGC + копирование кадра в ОЗУ.
-    let sw_fmt = match (enc.hardware, enc.vendor.as_str()) {
-        (true, "qsv") => ",format=nv12",
-        (true, _) => "",
-        (false, _) => ",format=yuv420p",
-    };
     v.push(Candidate {
         label: "Windows.Graphics.Capture".into(),
         zero_copy: false,
         graph: format!("{gfx},hwdownload,format=bgra{sw_fmt}"),
     });
-
-    // 3. DXGI Desktop Duplication (только монитор).
-    if let Target::Monitor(m) = t {
-        let (w, h) = out_size(m.width, m.height, s.height);
-        let scale = if (w, h) != (even(m.width), even(m.height)) {
-            format!(",scale={w}:{h}:flags=fast_bilinear")
-        } else {
-            String::new()
-        };
-        v.push(Candidate {
-            label: "DXGI Desktop Duplication".into(),
-            zero_copy: false,
-            graph: format!("ddagrab=output_idx={}:framerate={fps},hwdownload,format=bgra{scale}{sw_fmt}", m.index),
-        });
-    }
     v
 }
 

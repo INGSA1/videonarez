@@ -6,6 +6,7 @@ mod config;
 mod editor;
 mod error;
 mod ffmpeg;
+mod share;
 mod shell;
 mod state;
 mod updates;
@@ -165,6 +166,7 @@ fn main() {
             editor::queue::queue_clear,
             get_autostart,
             set_autostart,
+            share::copy_file_to_clipboard,
             updates::check_update,
             updates::install_update,
             app_version,

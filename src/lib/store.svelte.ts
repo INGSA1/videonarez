@@ -544,6 +544,21 @@ export function clearQueue() {
   void invoke("queue_clear");
 }
 
+/** Положить файл клипа в буфер обмена, чтобы вставить его в Discord через Ctrl+V. */
+export async function copyForDiscord(path: string) {
+  try {
+    const bytes = await invoke<number>("copy_file_to_clipboard", { path });
+    const mb = bytes / 1048576;
+    toast(
+      mb > 10
+        ? `Скопировано, ${mb.toFixed(0)} МБ. Без Nitro Discord принимает до 10 МБ: сожмите готовой настройкой «Discord, до 10 МБ».`
+        : "Скопировано. Вставьте в Discord через Ctrl+V.",
+    );
+  } catch (e) {
+    app.error = String(e);
+  }
+}
+
 // ---------- Обновления ----------
 
 export async function checkUpdates(manual: boolean) {

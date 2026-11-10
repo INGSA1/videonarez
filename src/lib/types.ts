@@ -115,6 +115,8 @@ export interface CaptureStatus {
   ffmpegPid: number | null;
   waitingForGame: boolean;
   game: string | null;
+  gpuPriority: string | null;
+  warning: string | null;
 }
 
 export type JobStatus = "queued" | "running" | "done" | "failed" | "cancelled";
