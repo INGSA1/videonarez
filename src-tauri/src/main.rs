@@ -113,6 +113,7 @@ fn main() {
             capture::recorder::spawn_monitor(app.handle().clone());
             capture::games::spawn_watcher(app.handle().clone());
             updates::spawn_background_check(app.handle().clone());
+            editor::gallery::spawn_cleanup(app.handle().clone());
             if let Some(w) = app.get_webview_window("main") {
                 if started_in_tray() {
                     let _ = w.destroy();
@@ -160,6 +161,9 @@ fn main() {
             editor::gallery::list_clips,
             editor::gallery::clip_preview,
             editor::gallery::open_clips_folder,
+            editor::gallery::rename_clip,
+            editor::gallery::delete_clip,
+            editor::gallery::run_cleanup,
             editor::queue::queue_add,
             editor::queue::queue_list,
             editor::queue::queue_cancel,

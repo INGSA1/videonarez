@@ -54,6 +54,20 @@
     toast("Кэш предпросмотра очищен");
   }
 
+  let cleaning = $state(false);
+  async function cleanNow() {
+    cleaning = true;
+    try {
+      await saveSettings(); // правила берутся из сохранённых настроек
+      const r = await invoke<{ files: number; bytes: number }>("run_cleanup");
+      toast(r.files ? `В корзину отправлено файлов: ${r.files}, ${fmtBytes(r.bytes)}` : "Убирать нечего: всё в пределах правил");
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      cleaning = false;
+    }
+  }
+
   function close() {
     app.showSettings = false;
     void saveSettings();
@@ -107,6 +121,24 @@
       <section>
         <h3 class="h">Папка для клипов</h3>
         <button class="dir" onclick={pickDir}><Icon name="folder" /> <span class="path">{s.outputDir}</span></button>
+      </section>
+
+      <section>
+        <h3 class="h">Автоочистка</h3>
+        <label class="row">
+          <span>Убирать клипы старше, дней <span class="dim">(0 = не убирать)</span></span>
+          <input type="number" min="0" max="3650" bind:value={s.cleanupDays} />
+        </label>
+        <label class="row">
+          <span>Держать папку не больше, ГБ <span class="dim">(0 = без лимита)</span></span>
+          <input type="number" min="0" max="100000" bind:value={s.cleanupMaxGb} />
+        </label>
+        <div class="row">
+          <span class="dim small">
+            Лишние клипы и записи уходят в корзину Windows, начиная с самых старых. Клипы, которым вы дали своё название, автоочистка не трогает.
+          </span>
+          <button onclick={cleanNow} disabled={cleaning || (!s.cleanupDays && !s.cleanupMaxGb)}>{cleaning ? "Очищаю" : "Очистить сейчас"}</button>
+        </div>
       </section>
 
       <section>

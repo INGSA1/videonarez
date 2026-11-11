@@ -67,6 +67,10 @@ export interface Settings {
   encoders: EncoderInfo[];
   ui: any;
   capture: CaptureSettings;
+  /** Автоочистка: убирать клипы старше N дней, 0 — выключено. */
+  cleanupDays: number;
+  /** Автоочистка: держать папку не больше N ГБ, 0 — выключено. */
+  cleanupMaxGb: number;
 }
 
 export interface CaptureSettings {

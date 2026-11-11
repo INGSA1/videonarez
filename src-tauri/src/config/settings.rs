@@ -22,6 +22,10 @@ pub struct Settings {
     pub ui: serde_json::Value,
     /// Фоновый захват и буфер повтора.
     pub capture: CaptureSettings,
+    /// Автоочистка: убирать в корзину клипы старше N дней (0 — выключено).
+    pub cleanup_days: u32,
+    /// Автоочистка: держать папку не больше N ГБ, убирая самые старые (0 — выключено).
+    pub cleanup_max_gb: u32,
 }
 
 impl Default for Settings {
@@ -33,6 +37,8 @@ impl Default for Settings {
             encoders: Vec::new(),
             ui: serde_json::Value::Null,
             capture: CaptureSettings::default(),
+            cleanup_days: 0,
+            cleanup_max_gb: 0,
         }
     }
 }

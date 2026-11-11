@@ -171,6 +171,11 @@ export function scheduleSave() {
 
 export async function saveSettings() {
   if (!app.settings) return;
+  // Пустое числовое поле даёт null, и настройки не сохранились бы целиком.
+  const int = (v: unknown) => Math.max(0, Math.floor(Number(v) || 0));
+  app.settings.cpuThreads = int(app.settings.cpuThreads);
+  app.settings.cleanupDays = int(app.settings.cleanupDays);
+  app.settings.cleanupMaxGb = int(app.settings.cleanupMaxGb);
   const { tracks: _t, ...opts } = $state.snapshot(app.opts);
   const s = { ...$state.snapshot(app.settings), ui: { opts, mode: app.mode } };
   try {
