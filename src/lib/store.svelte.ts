@@ -2,7 +2,7 @@ import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { clamp } from "./format";
-import { cropRect, defaultExport, PRESETS } from "./presets";
+import { cropRect, defaultExport, FRAME_DEFAULTS, PRESETS } from "./presets";
 import type {
   CaptureSettings,
   CaptureSources,
@@ -42,6 +42,7 @@ export const app = $state({
   currentTime: 0,
   playing: false,
   playRange: false,
+  editingFrame: false,
 
   inPoint: 0,
   outPoint: 0,
@@ -146,6 +147,10 @@ export async function init() {
     const ui = app.settings.ui;
     if (ui && typeof ui === "object" && ui.opts) {
       app.opts = { ...defaultExport(), ...ui.opts, tracks: {} };
+      // У старых настроек кадрирование действовало только в режиме перекодирования.
+      if (ui.opts.cropZoom === undefined && app.opts.mode !== "encode") {
+        app.opts.aspect = FRAME_DEFAULTS.aspect;
+      }
     }
     if (ui && typeof ui === "object" && ui.mode === "capture") app.mode = "capture";
     app.cap.draft = structuredClone($state.snapshot(app.settings.capture));
@@ -216,6 +221,10 @@ export async function openPath(path: string) {
     app.waveTrack = 0;
     app.segments = [];
     app.selectedId = null;
+    app.editingFrame = false;
+    app.opts.cropZoom = FRAME_DEFAULTS.cropZoom;
+    app.opts.cropX = FRAME_DEFAULTS.cropX;
+    app.opts.cropY = FRAME_DEFAULTS.cropY;
     app.inPoint = 0;
     app.outPoint = meta.duration;
     app.currentTime = 0;
@@ -467,6 +476,11 @@ export function applyPreset(key: string) {
   if (p) Object.assign(app.opts, p.apply);
 }
 
+export function videoCrop() {
+  const m = app.meta;
+  return m?.hasVideo ? cropRect(m.displayWidth, m.displayHeight, app.opts) : null;
+}
+
 export function exportSegments() {
   return app.segments.length
     ? app.segments.map((s) => ({ start: s.start, end: s.end, name: s.name || null }))
@@ -484,13 +498,13 @@ export async function startExport() {
   const st = app.settings;
   if (!m || !st) return; // идущий экспорт не мешает: новое задание встаёт в очередь
   const o = app.opts;
-  const crop = o.mode === "encode" ? cropRect(m.displayWidth, m.displayHeight, o.aspect, o.cropX, o.cropY) : null;
+  const crop = videoCrop();
   const segments = exportSegments();
   const req = {
     input: m.path,
     segments,
     merge: o.merge && segments.length > 1,
-    mode: o.mode,
+    mode: crop ? "encode" : o.mode,
     container: o.container,
     outputDir: clipsDir(),
     baseName: app.baseName || "clip",

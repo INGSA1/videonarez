@@ -214,6 +214,7 @@ export interface ExportOptions {
   aspect: AspectKey;
   cropX: number;
   cropY: number;
+  cropZoom: number;
   rate: RateKind;
   quality: number;
   bitrateKbps: number;

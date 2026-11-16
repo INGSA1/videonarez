@@ -47,6 +47,14 @@ pub struct CropRect {
     pub y: u32,
     pub w: u32,
     pub h: u32,
+    /// Размер выходного кадра с учётом выбранного разрешения.
+    pub frame_size: Option<FrameSize>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct FrameSize {
+    pub w: u32,
+    pub h: u32,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -603,6 +611,8 @@ async fn encode_segment(ctx: &mut Ctx<'_>, seg: &Segment, out: &Path, size_dur: 
     let audio_kbps = if audio.is_some() { s.audio_bitrate_kbps.clamp(32, 512) } else { 0 };
     // Для расчёта под размер файла учитываем все звуковые потоки (при раздельных дорожках их несколько).
     let audio_total_kbps = audio_kbps * audio.as_ref().map_or(0, |(_, l)| l.len() as u32);
+    let frame_size = s.crop.as_ref().and_then(|c| c.frame_size.as_ref())
+        .filter(|size| size.w >= 2 && size.h >= 2);
 
     // Режим битрейта
     let mut height = s.height.filter(|h| *h > 0);
@@ -625,7 +635,9 @@ async fn encode_segment(ctx: &mut Ctx<'_>, seg: &Segment, out: &Path, size_dur: 
             let v = v as u32;
             // При низком битрейте уменьшаем разрешение, иначе картинка рассыплется на блоки.
             if height.is_none() {
-                let src_h = s.crop.as_ref().map(|c| c.h).unwrap_or(m.display_height);
+                let src_h = frame_size.map(|size| size.h)
+                    .or_else(|| s.crop.as_ref().map(|c| c.h))
+                    .unwrap_or(m.display_height);
                 let auto = if v < 700 { 480 } else if v < 1500 { 720 } else { 0 };
                 if auto > 0 && src_h > auto {
                     height = Some(auto);
@@ -652,16 +664,29 @@ async fn encode_segment(ctx: &mut Ctx<'_>, seg: &Segment, out: &Path, size_dur: 
     let mut last_err = None;
     for (enc, hwaccel) in attempts {
         let mut vf: Vec<String> = Vec::new();
+        let (mut cropped_w, mut cropped_h) = (m.display_width, m.display_height);
         if let Some(c) = &s.crop {
             let w = (c.w.min(m.display_width) / 2) * 2;
             let h = (c.h.min(m.display_height) / 2) * 2;
+            if w == 0 || h == 0 {
+                return Err(AppError::msg("Область кадрирования слишком мала"));
+            }
             let x = (c.x.min(m.display_width - w) / 2) * 2;
             let y = (c.y.min(m.display_height - h) / 2) * 2;
             if w < m.display_width || h < m.display_height {
-                vf.push(format!("crop={w}:{h}:{x}:{y}"));
+                vf.push(format!("crop={w}:{h}:{x}:{y}:exact=1"));
+                (cropped_w, cropped_h) = (w, h);
             }
         }
-        if let Some(h) = height {
+        if let Some(size) = frame_size {
+            let h = height.unwrap_or(size.h).max(2) & !1;
+            let base_h = u64::from(size.h);
+            let w = (((u64::from(size.w) * u64::from(h) + base_h) / (2 * base_h)) * 2).max(2);
+            if w != u64::from(cropped_w) || h != cropped_h {
+                vf.push(format!("scale={w}:{h}:flags=bicubic"));
+            }
+            vf.push("setsar=1".into());
+        } else if let Some(h) = height {
             vf.push(format!("scale=-2:{}:flags=bicubic", h - h % 2));
         }
         if let Some(f) = s.fps.filter(|f| *f > 0.0) {

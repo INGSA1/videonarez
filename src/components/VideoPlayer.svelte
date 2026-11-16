@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import { app, player, curRange, onVideoError, togglePlay, step, skip, setIn, setOut, playRange, addSegment, seek } from "../lib/store.svelte";
-  import { cropRect } from "../lib/presets";
+  import { app, player, curRange, onVideoError, togglePlay, step, skip, setIn, setOut, playRange, addSegment, seek, videoCrop } from "../lib/store.svelte";
+  import { FRAME_ASPECTS, FRAME_DEFAULTS, MAX_CROP_ZOOM } from "../lib/presets";
   import { fmtTime, clamp } from "../lib/format";
   import Icon from "./Icon.svelte";
   import Timecode from "./Timecode.svelte";
@@ -11,6 +11,8 @@
   let stage: HTMLDivElement;
   let sw = $state(0);
   let sh = $state(0);
+  let videoWidth = $state(0);
+  let videoHeight = $state(0);
   let volume = $state(1);
   let muted = $state(false);
   let rate = $state(1);
@@ -58,27 +60,41 @@
     }
   });
 
+  function fitRect(width: number, height: number) {
+    const scale = Math.min(sw / width, sh / height);
+    const w = width * scale;
+    const h = height * scale;
+    return { x: (sw - w) / 2, y: (sh - h) / 2, w, h };
+  }
+
   // Прямоугольник, который реально занимает видео внутри сцены (object-fit: contain).
   const vr = $derived.by(() => {
     const m = app.meta;
-    if (!m || !sw || !sh || !m.displayWidth) return { x: 0, y: 0, w: 0, h: 0 };
-    const a = m.displayWidth / m.displayHeight;
-    let w = sw;
-    let h = sw / a;
-    if (h > sh) {
-      h = sh;
-      w = sh * a;
-    }
-    return { x: (sw - w) / 2, y: (sh - h) / 2, w, h };
+    if (!m?.displayWidth || !m.displayHeight) return { x: 0, y: 0, w: 0, h: 0 };
+    return fitRect(videoWidth || m.displayWidth, videoHeight || m.displayHeight);
   });
 
   const crop = $derived.by(() => {
     const m = app.meta;
-    if (!m || app.opts.mode !== "encode") return null;
-    const r = cropRect(m.displayWidth, m.displayHeight, app.opts.aspect, app.opts.cropX, app.opts.cropY);
-    if (!r) return null;
-    const k = vr.w / m.displayWidth;
-    return { x: vr.x + r.x * k, y: vr.y + r.y * k, w: r.w * k, h: r.h * k, src: r };
+    const r = videoCrop();
+    if (!m || !r || !vr.w || !vr.h) return null;
+    const sx = vr.w / m.displayWidth;
+    const sy = vr.h / m.displayHeight;
+    return { x: vr.x + r.x * sx, y: vr.y + r.y * sy, w: r.w * sx, h: r.h * sy, src: r };
+  });
+
+  const preview = $derived.by(() => {
+    if (app.editingFrame || !crop) return null;
+    const { w, h } = crop.src.frameSize;
+    const view = fitRect(w, h);
+    const sx = view.w / crop.w;
+    const sy = view.h / crop.h;
+    const x = view.x - crop.x * sx;
+    const y = view.y - crop.y * sy;
+    return {
+      clip: `inset(${view.y}px ${view.x}px)`,
+      transform: `translate(${x}px, ${y}px) scale(${sx}, ${sy})`,
+    };
   });
 
   // Обновление времени покадрово только во время воспроизведения.
@@ -120,20 +136,43 @@
   }
 
   // Перетаскивание рамки кадрирования
-  let drag: { px: number; py: number; cx: number; cy: number } | null = null;
+  let drag: { pointer: number; px: number; py: number; cx: number; cy: number } | null = null;
   function cropDown(e: PointerEvent) {
-    drag = { px: e.clientX, py: e.clientY, cx: app.opts.cropX, cy: app.opts.cropY };
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    if (e.button !== 0 || drag) return;
+    drag = { pointer: e.pointerId, px: e.clientX, py: e.clientY, cx: app.opts.cropX, cy: app.opts.cropY };
+    (e.currentTarget as HTMLButtonElement).setPointerCapture(e.pointerId);
   }
   function cropMove(e: PointerEvent) {
-    if (!drag || !crop) return;
+    if (!drag || e.pointerId !== drag.pointer || !crop) return;
     const freeX = vr.w - crop.w;
     const freeY = vr.h - crop.h;
-    if (freeX > 1) app.opts.cropX = clamp(drag.cx + (e.clientX - drag.px) / freeX, 0, 1);
-    if (freeY > 1) app.opts.cropY = clamp(drag.cy + (e.clientY - drag.py) / freeY, 0, 1);
+    if (freeX > 0) app.opts.cropX = clamp(drag.cx + (e.clientX - drag.px) / freeX, 0, 1);
+    if (freeY > 0) app.opts.cropY = clamp(drag.cy + (e.clientY - drag.py) / freeY, 0, 1);
   }
-  function cropUp() {
-    drag = null;
+  function cropUp(e: PointerEvent) {
+    if (drag?.pointer === e.pointerId) drag = null;
+  }
+
+  function cropKey(e: KeyboardEvent) {
+    const step = e.shiftKey ? 0.1 : 0.02;
+    switch (e.key) {
+      case "ArrowLeft": app.opts.cropX = clamp(app.opts.cropX - step, 0, 1); break;
+      case "ArrowRight": app.opts.cropX = clamp(app.opts.cropX + step, 0, 1); break;
+      case "ArrowUp": app.opts.cropY = clamp(app.opts.cropY - step, 0, 1); break;
+      case "ArrowDown": app.opts.cropY = clamp(app.opts.cropY + step, 0, 1); break;
+      default: return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
+  function setAspect() {
+    app.opts.preset = "custom";
+  }
+
+  function resetFrame() {
+    Object.assign(app.opts, FRAME_DEFAULTS);
+    setAspect();
   }
 
   const range = $derived(curRange());
@@ -148,33 +187,53 @@
 
 <div class="player">
   <div class="stage" bind:this={stage} ondblclick={togglePlay} role="presentation">
-    <video
-      bind:this={video}
-      src={app.src || undefined}
-      preload="metadata"
-      playsinline
-      disablepictureinpicture
-      {onplay}
-      {onpause}
-      {onseeked}
-      onerror={() => app.src && onVideoError()}
-      onclick={togglePlay}
-    ></video>
+    <div class="picture" style:clip-path={preview?.clip}>
+      <video
+        bind:this={video}
+        src={app.src || undefined}
+        style:transform={preview?.transform}
+        preload="metadata"
+        playsinline
+        disablepictureinpicture
+        {onplay}
+        {onpause}
+        {onseeked}
+        onresize={() => { videoWidth = video.videoWidth; videoHeight = video.videoHeight; }}
+        onerror={() => app.src && onVideoError()}
+        onclick={togglePlay}
+      ></video>
+    </div>
 
-    {#if crop}
+    {#if app.editingFrame && crop}
       <div class="shade" style="left:{vr.x}px;top:{vr.y}px;width:{vr.w}px;height:{vr.h}px;
         clip-path: polygon(0 0,100% 0,100% 100%,0 100%,0 0,{crop.x - vr.x}px {crop.y - vr.y}px,{crop.x - vr.x}px {crop.y - vr.y + crop.h}px,{crop.x - vr.x + crop.w}px {crop.y - vr.y + crop.h}px,{crop.x - vr.x + crop.w}px {crop.y - vr.y}px,{crop.x - vr.x}px {crop.y - vr.y}px)"></div>
-      <div
+      <button
+        type="button"
         class="crop"
+        title="Перетащите рамку или двигайте её стрелками"
+        aria-label="Положение рамки кадрирования"
         style="left:{crop.x}px;top:{crop.y}px;width:{crop.w}px;height:{crop.h}px"
         onpointerdown={cropDown}
         onpointermove={cropMove}
-        onpointerup={cropUp}
-        role="presentation"
+        onlostpointercapture={cropUp}
+        onkeydown={cropKey}
+        ondblclick={(e) => e.stopPropagation()}
       >
-        <span class="crop-label">{app.opts.aspect}, {crop.src.w}×{crop.src.h}</span>
+        <span class="crop-label">{crop.src.w}×{crop.src.h}</span>
         <i class="g1"></i><i class="g2"></i><i class="g3"></i><i class="g4"></i>
-      </div>
+      </button>
+    {/if}
+
+    {#if app.meta?.hasVideo}
+      <button
+        class="frame-toggle"
+        class:active={app.editingFrame}
+        aria-expanded={app.editingFrame}
+        onclick={() => (app.editingFrame = !app.editingFrame)}
+        ondblclick={(e) => e.stopPropagation()}
+      >
+        <Icon name={app.editingFrame ? "check" : "crop"} /> {app.editingFrame ? "Готово" : "Кадрирование"}
+      </button>
     {/if}
 
     {#if app.proxyPercent >= 0}
@@ -187,6 +246,26 @@
       </div>
     {/if}
   </div>
+
+  {#if app.editingFrame}
+    <div class="frame-controls">
+      <label>
+        Формат
+        <select bind:value={app.opts.aspect} onchange={setAspect}>
+          {#each FRAME_ASPECTS as aspect (aspect)}
+            <option value={aspect}>{aspect === "none" ? "Исходный" : aspect}</option>
+          {/each}
+        </select>
+      </label>
+      <label class="zoom">
+        Масштаб
+        <input type="range" min="100" max={MAX_CROP_ZOOM} step="1" bind:value={app.opts.cropZoom}
+          aria-valuetext={`${app.opts.cropZoom}%`} />
+        <span class="mono">{app.opts.cropZoom}%</span>
+      </label>
+      <button class="ghost" onclick={resetFrame}>Сбросить</button>
+    </div>
+  {/if}
 
   <div class="controls">
     <div class="grp">
@@ -253,6 +332,36 @@
     height: 100%;
     object-fit: contain;
     background: #050507;
+    transform-origin: top left;
+  }
+  .picture {
+    position: absolute;
+    inset: 0;
+  }
+  .frame-toggle {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+  }
+  .frame-controls {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 6px 14px;
+    background: var(--panel);
+    border-top: 1px solid var(--line);
+  }
+  .frame-controls label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+  }
+  .zoom input {
+    width: clamp(80px, 15vw, 180px);
+  }
+  .zoom span {
+    min-width: 4ch;
   }
   .shade {
     position: absolute;
@@ -262,8 +371,15 @@
   .crop {
     position: absolute;
     border: 2px solid var(--cue);
+    border-radius: 0;
+    background: transparent;
+    padding: 0;
     cursor: move;
     touch-action: none;
+  }
+  .crop:hover {
+    background: transparent;
+    border-color: var(--cue);
   }
   .crop i {
     position: absolute;
@@ -284,6 +400,7 @@
     border-radius: 3px;
     background: var(--cue);
     color: var(--cue-ink);
+    pointer-events: none;
   }
   .overlay {
     position: absolute;

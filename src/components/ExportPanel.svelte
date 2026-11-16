@@ -1,10 +1,10 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
-  import { app, startExport, cancelExport, reveal, applyPreset, exportSegments, saveSettings, copyForDiscord, clipsDir } from "../lib/store.svelte";
-  import { PRESETS, HEIGHTS, VERTICAL_HEIGHTS, FPS_OPTIONS, cropRect } from "../lib/presets";
+  import { app, startExport, cancelExport, reveal, applyPreset, exportSegments, saveSettings, copyForDiscord, clipsDir, videoCrop } from "../lib/store.svelte";
+  import { ASPECTS, PRESETS, HEIGHTS, VERTICAL_HEIGHTS, FPS_OPTIONS } from "../lib/presets";
   import { fmtTime, fmtBytes, fmtDur } from "../lib/format";
   import Icon from "./Icon.svelte";
-  import type { AspectKey, Codec, TrimMode, Vendor } from "../lib/types";
+  import type { Codec, TrimMode, Vendor } from "../lib/types";
 
   const o = $derived(app.opts);
   const m = $derived(app.meta);
@@ -22,8 +22,6 @@
     { id: "hevc", label: "HEVC" },
     { id: "av1", label: "AV1" },
   ];
-  const ASPECT_KEYS: AspectKey[] = ["none", "9:16", "1:1", "4:5", "16:9", "4:3"];
-
   const codecAvailable = (c: Codec) => encoders.length === 0 || encoders.some((e) => e.codec === c);
   const vendorsFor = $derived(Array.from(new Set(encoders.filter((e) => e.codec === o.codec).map((e) => e.vendor))));
   const activeEncoder = $derived.by(() => {
@@ -36,26 +34,26 @@
   const totalDur = $derived(segs.reduce((a, s) => a + (s.end - s.start), 0));
   const files = $derived(o.merge && segs.length > 1 ? 1 : segs.length);
 
-  const crop = $derived(m && o.mode === "encode" ? cropRect(m.displayWidth, m.displayHeight, o.aspect, o.cropX, o.cropY) : null);
-  const vertical = $derived(crop ? crop.h > crop.w : m ? m.displayHeight > m.displayWidth : false);
+  const crop = $derived(videoCrop());
+  const mode = $derived(crop ? "encode" : o.mode);
+  const frameWidth = $derived(crop?.frameSize.w ?? m?.displayWidth ?? 0);
+  const frameHeight = $derived(crop?.frameSize.h ?? m?.displayHeight ?? 0);
+  const vertical = $derived(frameHeight > frameWidth);
   const heights = $derived(vertical ? VERTICAL_HEIGHTS : HEIGHTS);
 
-  const outRes = $derived.by(() => {
-    if (!m) return "";
-    let w = crop?.w ?? m.displayWidth;
-    let h = crop?.h ?? m.displayHeight;
-    if (o.mode === "encode" && o.height) {
-      w = Math.round((w * o.height) / h / 2) * 2;
-      h = o.height;
-    }
-    return `${w}×${h}`;
-  });
+  function widthAt(height: number) {
+    const ratio = (crop && ASPECTS[o.aspect]) || (m ? m.displayWidth / m.displayHeight : 1);
+    return Math.max(2, Math.round(height * ratio / 2) * 2);
+  }
+  const outRes = $derived(!crop && o.height && frameHeight
+    ? `${widthAt(o.height)}×${o.height}`
+    : `${frameWidth}×${frameHeight}`);
 
   // Оценка размера
   const estimate = $derived.by(() => {
     if (!m) return "";
     const per = o.merge ? totalDur : Math.max(...segs.map((s) => s.end - s.start));
-    if (o.mode !== "encode") {
+    if (mode !== "encode") {
       const br = m.bitRate ?? (m.sizeBytes * 8) / m.duration;
       return `≈ ${fmtBytes((br / 8) * totalDur)} всего`;
     }
@@ -99,16 +97,25 @@
   <section>
     <div class="modes">
       {#each MODES as md (md.id)}
-        <button class="mode" class:active={o.mode === md.id} onclick={() => setMode(md.id)} title={md.hint}>
+        <button class="mode" class:active={mode === md.id} disabled={!!crop && md.id !== "encode"}
+          onclick={() => setMode(md.id)} title={md.hint}>
           <Icon name={md.icon} size={18} />
           <span>{md.label}</span>
         </button>
       {/each}
     </div>
-    <p class="hint dim">{MODES.find((x) => x.id === o.mode)?.hint}</p>
+    <p class="hint dim">{crop ? "Кадрирование требует перекодирования." : MODES.find((x) => x.id === mode)?.hint}</p>
   </section>
 
-  {#if o.mode === "encode"}
+  {#if m?.hasVideo}
+    <section>
+      <button class="dir" onclick={() => (app.editingFrame = true)}>
+        <Icon name="crop" /> Настроить кадр{#if crop} · {o.cropZoom}%{/if}
+      </button>
+    </section>
+  {/if}
+
+  {#if mode === "encode"}
     <section>
       <h3 class="h">Пресет</h3>
       <div class="presets">
@@ -138,7 +145,7 @@
         <span>Разрешение</span>
         <select bind:value={o.height} onchange={custom}>
           <option value={null}>Исходное</option>
-          {#each heights as h (h)}<option value={h}>{vertical ? `${Math.round((h * 9) / 16)}×${h}` : `${h}p`}</option>{/each}
+          {#each heights as h (h)}<option value={h}>{vertical ? `${widthAt(h)}×${h}` : `${h}p`}</option>{/each}
         </select>
       </label>
       <label>
@@ -148,18 +155,6 @@
           {#each FPS_OPTIONS as f (f)}<option value={f}>{f}</option>{/each}
         </select>
       </label>
-    </section>
-
-    <section>
-      <h3 class="h"><Icon name="crop" size={13} /> Кадрирование</h3>
-      <div class="presets">
-        {#each ASPECT_KEYS as a (a)}
-          <button class="chip" class:active={o.aspect === a} onclick={() => { o.aspect = a; o.cropX = 0.5; o.cropY = 0.5; custom(); }}>
-            {a === "none" ? "Без обрезки" : a}
-          </button>
-        {/each}
-      </div>
-      {#if crop}<p class="hint dim">Перетащите рамку на видео, чтобы выбрать область.</p>{/if}
     </section>
 
     <section>
@@ -268,7 +263,7 @@
 
   <div class="footer">
     <div class="summary">
-      <div><b>{files === 1 ? "Один файл" : `Файлов: ${files}`}</b>, <span class="mono">{fmtDur(totalDur)}</span>{#if o.mode === "encode"}, {outRes}, {o.codec.toUpperCase()}{/if}</div>
+      <div><b>{files === 1 ? "Один файл" : `Файлов: ${files}`}</b>, <span class="mono">{fmtDur(totalDur)}</span>{#if mode === "encode" && m}, {outRes}, {o.codec.toUpperCase()}{/if}</div>
       <div class="dim">{estimate}</div>
     </div>
 
