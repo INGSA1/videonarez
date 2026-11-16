@@ -537,7 +537,8 @@ pub fn save_replay(app: &AppHandle, secs: Option<f64>) -> AppResult<()> {
         let stem = format!("{prefix}_{}", sources::local_stamp());
         let mp4 = unique(&dir, &stem, "mp4");
         let ts = dir.join(format!(".{stem}.ts.part"));
-        let res = std::fs::write(&ts, &data)
+        let res = std::fs::File::create(&ts)
+            .and_then(|mut file| data.write_to(&mut file))
             .map_err(|e| e.to_string())
             .and_then(|_| remux(&ts, &mp4, &tracks));
         let _ = std::fs::remove_file(&ts);

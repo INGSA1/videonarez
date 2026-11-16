@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 pub const TS: usize = 188;
@@ -17,7 +18,22 @@ pub const PMT_PID: u16 = 0x1000;
 
 struct Chunk {
     at: Instant,
-    data: Vec<u8>,
+    data: Arc<Vec<u8>>,
+}
+
+pub struct ReplaySnapshot {
+    headers: Vec<u8>,
+    chunks: Vec<Arc<Vec<u8>>>,
+}
+
+impl ReplaySnapshot {
+    pub fn write_to(self, file: &mut File) -> std::io::Result<()> {
+        file.write_all(&self.headers)?;
+        for chunk in self.chunks {
+            file.write_all(&chunk)?;
+        }
+        Ok(())
+    }
 }
 
 pub struct Recording {
@@ -96,17 +112,17 @@ impl Ring {
                 let now = Instant::now();
                 // Завершённый кусок больше не растёт — отдаём лишнюю ёмкость.
                 if let Some(last) = self.chunks.back_mut() {
-                    last.data.shrink_to_fit();
+                    Arc::make_mut(&mut last.data).shrink_to_fit();
                 }
                 let cap = self.chunks.back().map(|c| c.data.len() + c.data.len() / 4).unwrap_or(1 << 20);
-                self.chunks.push_back(Chunk { at: now, data: Vec::with_capacity(cap) });
+                self.chunks.push_back(Chunk { at: now, data: Arc::new(Vec::with_capacity(cap)) });
                 self.trim(now);
                 self.on_keyframe_rec();
             }
         }
         // Пакеты до первого ключевого кадра не нужны.
         if let Some(c) = self.chunks.back_mut() {
-            c.data.extend_from_slice(p);
+            Arc::make_mut(&mut c.data).extend_from_slice(p);
             self.bytes += TS;
             if pid == VIDEO_PID && pusi && self.frames % 64 == 0 {
                 self.guard();
@@ -187,7 +203,7 @@ impl Ring {
     }
 
     /// Последние `secs` секунд как готовый TS (PAT/PMT + куски от ключевого кадра).
-    pub fn snapshot(&self, secs: f64) -> Option<(Vec<u8>, f64)> {
+    pub fn snapshot(&self, secs: f64) -> Option<(ReplaySnapshot, f64)> {
         if self.chunks.is_empty() {
             return None;
         }
@@ -200,14 +216,13 @@ impl Ring {
                 break;
             }
         }
-        let size: usize = self.chunks.iter().skip(start).map(|c| c.data.len()).sum();
-        let mut out = self.headers();
-        out.reserve(size);
-        for c in self.chunks.iter().skip(start) {
-            out.extend_from_slice(&c.data);
-        }
+        // Завершённые куски неизменяемы. Копируем только тот, в который ещё идёт запись.
+        let mut chunks: Vec<_> = self.chunks.range(start..self.chunks.len() - 1)
+            .map(|chunk| Arc::clone(&chunk.data))
+            .collect();
+        chunks.push(Arc::new(self.chunks.back()?.data.as_ref().clone()));
         let dur = now.duration_since(self.chunks[start].at).as_secs_f64();
-        Some((out, dur))
+        Some((ReplaySnapshot { headers: self.headers(), chunks }, dur))
     }
 
     /// Запись начинается с текущего куска (ключевой кадр ≤ 1 с назад), чтобы момент нажатия
