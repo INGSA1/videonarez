@@ -157,6 +157,7 @@ fn main() {
             capture::recorder::capture_toggle_record,
             capture::recorder::capture_apply_settings,
             capture::recorder::capture_recent,
+            capture::sound::preview_capture_sound,
             editor::tracks::extract_audio_tracks,
             editor::gallery::list_clips,
             editor::gallery::clip_preview,

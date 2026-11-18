@@ -43,7 +43,7 @@ impl Default for Settings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CaptureSettings {
     /// monitor | window | auto (следовать за полноэкранной игрой)
@@ -66,6 +66,8 @@ pub struct CaptureSettings {
     /// Длина буфера повтора, секунд.
     pub buffer_secs: u32,
     pub system_audio: bool,
+    /// ID выхода для системного звука, "" = следовать за выходом Windows по умолчанию.
+    pub audio_output: String,
     /// Только звук выбранного окна (Process Loopback) вместо всего системного.
     pub app_audio_only: bool,
     pub mic: bool,
@@ -85,6 +87,8 @@ pub struct CaptureSettings {
     pub auto_start: bool,
     /// Звуковой сигнал при сохранении клипа.
     pub sound: bool,
+    pub sound_file: String,
+    pub sound_volume: u8,
     /// Закрытие окна сворачивает в трей (WebView2 уничтожается, захват продолжается).
     pub close_to_tray: bool,
     /// Прямой захват AMD (vsrc_amf, zero-copy). Экспериментально: при резкой остановке во время
@@ -107,6 +111,7 @@ impl Default for CaptureSettings {
             bitrate_mbps: 20.0,
             buffer_secs: 60,
             system_audio: true,
+            audio_output: String::new(),
             app_audio_only: false,
             mic: false,
             audio_apps: Vec::new(),
@@ -118,6 +123,8 @@ impl Default for CaptureSettings {
             hotkey_record: "Alt+F9".into(),
             auto_start: false,
             sound: true,
+            sound_file: String::new(),
+            sound_volume: 100,
             close_to_tray: true,
             amf_direct: false,
         }
@@ -159,8 +166,8 @@ pub fn init(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 pub fn persist(state: &AppState) -> AppResult<()> {
-    let path = state.settings_path.lock().unwrap().clone();
-    if let Some(p) = path {
+    let path = state.settings_path.lock().unwrap();
+    if let Some(p) = path.as_ref() {
         let s = state.settings();
         std::fs::write(&p, serde_json::to_vec_pretty(&s)?)?;
     }
@@ -173,10 +180,12 @@ pub fn get_settings(state: State<'_, AppState>) -> Settings {
 }
 
 #[tauri::command]
-pub fn save_settings(state: State<'_, AppState>, settings: Settings) -> AppResult<()> {
+pub fn save_settings(state: State<'_, AppState>, mut settings: Settings) -> AppResult<()> {
     {
         let mut g = state.settings.write().unwrap();
         let encoders = std::mem::take(&mut g.encoders);
+        // Захват меняется через capture_apply_settings, в том числе при открытом редакторе.
+        std::mem::swap(&mut settings.capture, &mut g.capture);
         *g = settings;
         if g.encoders.is_empty() {
             g.encoders = encoders;

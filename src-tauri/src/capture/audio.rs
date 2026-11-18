@@ -5,7 +5,7 @@
 //!
 //! WASAPI в loopback-режиме не присылает пакеты, пока ничего не играет, поэтому поток
 //! дописывает тишину по часам: аудиодорожка всегда идёт ровно в реальном времени и не
-//! расходится с видео. Если устройство пропало — дорожка продолжается тишиной.
+//! расходится с видео. Во время переподключения дорожка продолжается тишиной.
 
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -23,8 +23,8 @@ const BYTES_PER_FRAME: usize = 4 * CH;
 
 #[derive(Debug, Clone)]
 pub enum AudioSource {
-    /// Всё, что звучит в системе (устройство вывода по умолчанию).
-    System,
+    /// Звук выбранного устройства вывода или выхода Windows по умолчанию.
+    System(Option<String>),
     /// Только указанный процесс и его дочерние процессы.
     Process(u32),
     /// Микрофон: ID устройства или устройство по умолчанию, плюс обработка голоса.
@@ -131,28 +131,31 @@ impl AudioFeed {
         let handle = std::thread::Builder::new()
             .name("audio-capture".into())
             .spawn(move || {
-                if let AudioSource::App(exe) = &source {
-                    // Приложение: ждём процесс, пишем его звук, после закрытия снова ждём.
-                    while !done() {
-                        match find_app_pid(exe) {
-                            Some(pid) => {
-                                if let Err(e) = capture(&AudioSource::Process(pid), &sink2, &done, Some(pid)) {
-                                    *error2.lock().unwrap() = Some(e.to_string());
-                                    sleep_unless(&done, Duration::from_secs(1));
-                                }
-                            }
-                            // Нет процесса — через 2 секунды ищем снова (тишину дописывает отправка).
-                            None => sleep_unless(&done, Duration::from_secs(2)),
-                        }
-                    }
+                if let Err(e) = initialize_mta().ok() {
+                    *error2.lock().unwrap() = Some(e.to_string());
                     return;
                 }
-                if let Err(e) = capture(&source, &sink2, &done, None) {
-                    if !done() {
-                        *error2.lock().unwrap() = Some(e.to_string());
+                while !done() {
+                    let pid = if let AudioSource::App(exe) = &source {
+                        let Some(pid) = find_app_pid(exe) else {
+                            *error2.lock().unwrap() = None;
+                            sleep_unless(&done, Duration::from_secs(2));
+                            continue;
+                        };
+                        Some(pid)
+                    } else {
+                        None
+                    };
+                    let process = pid.map(AudioSource::Process);
+                    let input = process.as_ref().unwrap_or(&source);
+                    if let Err(e) = capture(input, &sink2, &done, pid, &error2) {
+                        if !done() {
+                            *error2.lock().unwrap() = Some(e.to_string());
+                            sleep_unless(&done, Duration::from_secs(1));
+                        }
                     }
                 }
-                // Устройство недоступно — дорожка продолжается тишиной из потока отправки.
+                wasapi::deinitialize();
             })?;
         Ok(AudioFeed { port, stop, handle: Some(handle), writer: Some(writer), error, t0, last_sound, sink })
     }
@@ -275,8 +278,8 @@ fn capture(
     sink: &Sink,
     done: &dyn Fn() -> bool,
     watch_pid: Option<u32>,
+    error: &Mutex<Option<String>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    initialize_mta().ok()?;
     let fmt = WaveFormat::new(32, 32, &SampleType::Float, RATE as usize, CH, None);
 
     // Подключение может зависнуть внутри Windows — помечаем его, чтобы показать в статусе.
@@ -289,20 +292,26 @@ fn capture(
     }
     let activating = Clear(sink);
 
-    let mut client = match source {
-        AudioSource::System => DeviceEnumerator::new()?
-            .get_default_device(&Direction::Render)?
-            .get_iaudioclient()?,
-        AudioSource::Process(pid) => AudioClient::new_application_loopback_client(*pid, true)?,
-        AudioSource::Mic(id, _) => {
+    let endpoint = match source {
+        AudioSource::System(id) => Some((Direction::Render, id)),
+        AudioSource::Mic(id, _) => Some((Direction::Capture, id)),
+        _ => None,
+    };
+    let mut follow_default = None;
+    let mut client = match (source, endpoint) {
+        (_, Some((direction, id))) => {
             let en = DeviceEnumerator::new()?;
-            match id {
-                Some(id) if !id.is_empty() => en.get_device(id)?,
-                _ => en.get_default_device(&Direction::Capture)?,
-            }
-            .get_iaudioclient()?
+            let dev = if let Some(id) = id {
+                en.get_device(id)?
+            } else {
+                let dev = en.get_default_device(&direction)?;
+                follow_default = Some((en, direction, dev.get_id()?));
+                dev
+            };
+            dev.get_iaudioclient()?
         }
-        AudioSource::App(_) => return Err("источник приложения обрабатывается выше".into()),
+        (AudioSource::Process(pid), _) => AudioClient::new_application_loopback_client(*pid, true)?,
+        _ => return Err("источник приложения обрабатывается выше".into()),
     };
     let buffer_hns = match source {
         AudioSource::Process(_) => 0,
@@ -317,6 +326,7 @@ fn capture(
     let cap = client.get_audiocaptureclient()?;
     client.start_stream()?;
     drop(activating);
+    *error.lock().unwrap() = None;
 
     let mut q: VecDeque<u8> = VecDeque::with_capacity(RATE as usize * BYTES_PER_FRAME / 10);
     let mut last_check = Instant::now();
@@ -328,12 +338,14 @@ fn capture(
     };
     let mut raw: VecDeque<u8> = VecDeque::new();
     while !done() {
-        if let Some(pid) = watch_pid {
-            if last_check.elapsed() > Duration::from_secs(1) {
-                last_check = Instant::now();
-                if !crate::capture::games::alive(pid) {
-                    let _ = client.stop_stream();
-                    return Ok(());
+        if last_check.elapsed() >= Duration::from_secs(1) {
+            last_check = Instant::now();
+            if watch_pid.is_some_and(|pid| !crate::capture::games::alive(pid)) {
+                break;
+            }
+            if let Some((en, direction, id)) = &follow_default {
+                if en.get_default_device(direction)?.get_id()? != *id {
+                    break; // Переподключиться, даже если прежний выход ещё включён.
                 }
             }
         }
@@ -519,7 +531,6 @@ pub fn list_audio_apps() -> Vec<AudioApp> {
     let mut map: BTreeMap<String, AudioApp> = BTreeMap::new();
     let own = std::process::id();
     let run = |map: &mut BTreeMap<String, AudioApp>| -> Result<(), Box<dyn std::error::Error>> {
-        let _ = initialize_mta();
         let dev = DeviceEnumerator::new()?.get_default_device(&Direction::Render)?;
         let en = dev.get_iaudiosessionmanager()?.get_audiosessionenumerator()?;
         for i in 0..en.get_count()? {
@@ -543,7 +554,11 @@ pub fn list_audio_apps() -> Vec<AudioApp> {
         }
         Ok(())
     };
+    let initialized = initialize_mta().is_ok();
     let _ = run(&mut map);
+    if initialized {
+        wasapi::deinitialize();
+    }
     for w in crate::capture::sources::windows() {
         if w.exe.is_empty() || w.exe.eq_ignore_ascii_case("explorer.exe") {
             continue;
@@ -568,16 +583,14 @@ pub struct AudioDevice {
     pub default: bool,
 }
 
-/// Список микрофонов.
-pub fn list_inputs() -> Vec<AudioDevice> {
+pub fn list_devices(direction: &Direction) -> Vec<AudioDevice> {
     let run = || -> Result<Vec<AudioDevice>, Box<dyn std::error::Error>> {
-        let _ = initialize_mta();
         let en = DeviceEnumerator::new()?;
         let default_id = en
-            .get_default_device(&Direction::Capture)
+            .get_default_device(direction)
             .and_then(|d| d.get_id())
             .unwrap_or_default();
-        let col = en.get_device_collection(&Direction::Capture)?;
+        let col = en.get_device_collection(direction)?;
         let mut v = Vec::new();
         for i in 0..col.get_nbr_devices()? {
             let d = col.get_device_at_index(i)?;
@@ -590,7 +603,12 @@ pub fn list_inputs() -> Vec<AudioDevice> {
         }
         Ok(v)
     };
-    run().unwrap_or_default()
+    let initialized = initialize_mta().is_ok();
+    let devices = run().unwrap_or_default();
+    if initialized {
+        wasapi::deinitialize();
+    }
+    devices
 }
 
 #[cfg(test)]
@@ -663,7 +681,7 @@ mod tests {
     fn feed_rates() {
         use std::io::Read;
         let srcs = vec![
-            ("система", AudioSource::System),
+            ("система", AudioSource::System(None)),
             ("Discord", AudioSource::App("Discord.exe".into())),
             ("Яндекс Музыка", AudioSource::App("Яндекс Музыка.exe".into())),
             ("микрофон", AudioSource::Mic(None, MicFx { noise: true, echo: false })),

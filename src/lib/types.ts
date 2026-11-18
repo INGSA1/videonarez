@@ -86,6 +86,7 @@ export interface CaptureSettings {
   bitrateMbps: number;
   bufferSecs: number;
   systemAudio: boolean;
+  audioOutput: string;
   appAudioOnly: boolean;
   mic: boolean;
   micDevice: string;
@@ -97,6 +98,8 @@ export interface CaptureSettings {
   hotkeyRecord: string;
   autoStart: boolean;
   sound: boolean;
+  soundFile: string;
+  soundVolume: number;
   closeToTray: boolean;
   amfDirect: boolean;
 }
@@ -117,6 +120,7 @@ export interface CaptureStatus {
   uptimeSecs: number;
   error: string | null;
   audioErrors: string[];
+  audioSignal: boolean | null;
   lastClip: string | null;
   ffmpegPid: number | null;
   waitingForGame: boolean;
@@ -170,6 +174,7 @@ export interface CaptureSources {
   monitors: MonitorInfo[];
   windows: WindowInfo[];
   mics: AudioDevice[];
+  audioOutputs: AudioDevice[];
   audioApps: AudioApp[];
 }
 

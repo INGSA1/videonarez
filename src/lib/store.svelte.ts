@@ -682,12 +682,13 @@ export async function captureRecord() {
 export async function applyCapture() {
   const d = app.cap.draft;
   if (!d || !app.settings) return;
+  const capture = $state.snapshot(d);
   app.cap.applying = true;
   try {
-    const errors = await invoke<string[]>("capture_apply_settings", { capture: $state.snapshot(d) });
-    app.settings.capture = structuredClone($state.snapshot(d));
+    const errors = await invoke<string[]>("capture_apply_settings", { capture });
+    app.settings.capture = structuredClone(capture);
     app.cap.hotkeyErrors = errors;
-    app.cap.dirty = false;
+    app.cap.dirty = JSON.stringify(app.cap.draft) !== JSON.stringify(capture);
     toast(errors.length ? "Настройки применены, но часть горячих клавиш занята" : "Настройки захвата применены");
   } catch (e) {
     app.error = String(e);

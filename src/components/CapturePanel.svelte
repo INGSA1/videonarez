@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { invoke } from "@tauri-apps/api/core";
+  import { open } from "@tauri-apps/plugin-dialog";
   import { app, captureToggle, captureSave, captureRecord, applyCapture, refreshSources, setAutostart } from "../lib/store.svelte";
   import { fmtTime } from "../lib/format";
   import Icon from "./Icon.svelte";
@@ -10,6 +12,14 @@
   const src = $derived(app.cap.sources);
   const d = $derived(app.cap.draft);
   const encoders = $derived(app.settings?.encoders ?? []);
+  const needsRestart = $derived.by(() => {
+    const saved = app.settings?.capture;
+    if (!saved || !d || !st?.running) return false;
+    return (Object.keys(d) as (keyof CaptureSettings)[]).some((key) =>
+      key !== "sound" && key !== "soundFile" && key !== "soundVolume" &&
+      JSON.stringify(d[key]) !== JSON.stringify(saved[key]),
+    );
+  });
 
   const VENDORS: Record<Vendor, string> = { nvenc: "NVIDIA NVENC", amf: "AMD AMF", qsv: "Intel QuickSync", cpu: "Процессор" };
   const vendorsFor = $derived(
@@ -20,6 +30,29 @@
     if (!d) return;
     d[k] = v;
     app.cap.dirty = true;
+  }
+
+  let soundPlaying = $state(false);
+
+  async function pickSound() {
+    try {
+      const path = await open({ filters: [{ name: "Аудио", extensions: ["wav", "mp3", "ogg", "opus", "flac", "m4a", "aac"] }] });
+      if (typeof path === "string") set("soundFile", path);
+    } catch (e) {
+      app.error = String(e);
+    }
+  }
+
+  async function previewSound() {
+    if (!d) return;
+    soundPlaying = true;
+    try {
+      await invoke("preview_capture_sound", { path: d.soundFile, volume: d.soundVolume });
+    } catch (e) {
+      app.error = String(e);
+    } finally {
+      soundPlaying = false;
+    }
   }
 
   // Приложения для отдельных дорожек: найденные сейчас + уже выбранные, но не запущенные.
@@ -155,6 +188,9 @@
 
       {#if st?.error}<p class="err">{st.error}</p>{/if}
       {#if st?.warning}<p class="warn">{st.warning}</p>{/if}
+      {#if st?.running}
+        <p class="hint">{st.audioSignal == null ? "Захват звука отключён" : st.audioSignal ? "Звуковой сигнал поступает" : "Сейчас звуковой сигнал не поступает"}</p>
+      {/if}
       {#each st?.audioErrors ?? [] as e (e)}<p class="warn">Звук не захватывается. {e}</p>{/each}
     </section>
 
@@ -207,9 +243,23 @@
 
       <section>
         <h3 class="h">Звук</h3>
-        <label class="check"><input type="checkbox" checked={d.systemAudio} onchange={(e) => set("systemAudio", e.currentTarget.checked)} /> {d.source === "monitor" ? "Весь звук системы" : "Звук игры"}</label>
+        <label class="check"><input type="checkbox" checked={d.systemAudio} onchange={(e) => set("systemAudio", e.currentTarget.checked)} /> {d.source !== "monitor" && d.appAudioOnly ? "Звук игры" : "Системный звук"}</label>
         {#if d.source !== "monitor" && d.systemAudio}
           <label class="check sub"><input type="checkbox" checked={d.appAudioOnly} onchange={(e) => set("appAudioOnly", e.currentTarget.checked)} /> Только из этой игры, без Discord и музыки</label>
+        {/if}
+        {#if d.systemAudio && (d.source === "monitor" || !d.appAudioOnly)}
+          <label class="row">
+            <span>Устройство вывода</span>
+            <select value={d.audioOutput} onchange={(e) => set("audioOutput", e.currentTarget.value)}>
+              <option value="">По умолчанию в Windows</option>
+              {#if d.audioOutput && !src?.audioOutputs?.some((device) => device.id === d.audioOutput)}
+                <option value={d.audioOutput}>Устройство недоступно</option>
+              {/if}
+              {#each src?.audioOutputs ?? [] as device (device.id)}
+                <option value={device.id}>{device.name}</option>
+              {/each}
+            </select>
+          </label>
         {/if}
         <div class="apps-head">
           <span>Отдельные дорожки для приложений</span>
@@ -321,16 +371,35 @@
         <label class="check"><input type="checkbox" checked={app.autostart} onchange={(e) => setAutostart(e.currentTarget.checked)} /> Запускать вместе с Windows, сразу в трей</label>
         <label class="check"><input type="checkbox" checked={d.autoStart} onchange={(e) => set("autoStart", e.currentTarget.checked)} /> Включать буфер при запуске</label>
         <label class="check"><input type="checkbox" checked={d.closeToTray} onchange={(e) => set("closeToTray", e.currentTarget.checked)} /> Закрывать окно в трей</label>
-        <label class="check"><input type="checkbox" checked={d.sound} onchange={(e) => set("sound", e.currentTarget.checked)} /> Сигнал при сохранении клипа</label>
         {#if src?.gpu?.vendor === "amf"}
           <label class="check"><input type="checkbox" checked={d.amfDirect} onchange={(e) => set("amfDirect", e.currentTarget.checked)} /> Прямой захват AMD</label>
           <p class="hint">Экономит около процента процессора, но с ним во время игры был замечен сбой видеодрайвера. Включайте, только если обычный захват не подходит.</p>
         {/if}
       </section>
 
+      <section>
+        <h3 class="h">Звук сохранения</h3>
+        <label class="check"><input type="checkbox" checked={d.sound} onchange={(e) => set("sound", e.currentTarget.checked)} /> Сигнал при сохранении клипов и записей</label>
+        {#if d.sound}
+          <p class="hint sound-file" title={d.soundFile}>{d.soundFile.split(/[\\/]/).pop() || "Стандартный сигнал"}</p>
+          <div class="sound-actions">
+            <button onclick={pickSound} title="Выбрать первые 5 секунд аудиофайла"><Icon name="folder" /> Выбрать файл</button>
+            {#if d.soundFile}<button class="ghost" onclick={() => set("soundFile", "")}>Сбросить</button>{/if}
+            <button class="ghost" onclick={previewSound} disabled={soundPlaying || !d.soundVolume}><Icon name="play" /> Прослушать</button>
+          </div>
+          <label class="row">
+            <span>Громкость сигнала</span>
+            <span class="sound-volume">
+              <input type="range" min="0" max="100" step="1" value={d.soundVolume} oninput={(e) => set("soundVolume", +e.currentTarget.value)} />
+              <span>{d.soundVolume}%</span>
+            </span>
+          </label>
+        {/if}
+      </section>
+
       <div class="apply">
         <button class="primary" disabled={!app.cap.dirty || app.cap.applying} onclick={applyCapture}>
-          {app.cap.applying ? "Применяю" : st?.running ? "Применить и перезапустить" : "Применить"}
+          {app.cap.applying ? "Применяю" : needsRestart ? "Применить и перезапустить" : "Применить"}
         </button>
       </div>
     {/if}
@@ -338,6 +407,20 @@
 </div>
 
 <style>
+  .sound-actions, .sound-volume {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .sound-volume input {
+    width: 100px;
+  }
+  .sound-file {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .capture {
     flex: 1;
     min-height: 0;

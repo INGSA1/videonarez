@@ -1,7 +1,7 @@
 //! Фоновый захват: запуск FFmpeg по «лестнице» кандидатов, кольцевой буфер в ОЗУ,
 //! сохранение повтора по горячей клавише, обычная запись, статус и автоперезапуск.
 
-use super::audio::{list_inputs, AudioDevice, AudioFeed, AudioSource};
+use super::audio::{list_devices, AudioDevice, AudioFeed, AudioSource};
 use super::games::GameInfo;
 use super::pipeline::{build_args, candidates, Candidate, Target};
 use super::ring::Ring;
@@ -150,6 +150,7 @@ pub struct CaptureStatus {
     pub uptime_secs: f64,
     pub error: Option<String>,
     pub audio_errors: Vec<String>,
+    pub audio_signal: Option<bool>,
     pub last_clip: Option<String>,
     pub ffmpeg_pid: Option<u32>,
     /// Режим «авто»: буфер взведён и ждёт полноэкранную игру.
@@ -176,6 +177,7 @@ pub struct CaptureSources {
     pub monitors: Vec<MonitorInfo>,
     pub windows: Vec<WindowInfo>,
     pub mics: Vec<AudioDevice>,
+    pub audio_outputs: Vec<AudioDevice>,
     pub audio_apps: Vec<super::audio::AudioApp>,
 }
 
@@ -236,7 +238,6 @@ pub fn start(app: &AppHandle) -> AppResult<()> {
     if state.settings().capture.source == "auto" && rec.game.lock().unwrap().is_none() {
         *rec.last_error.lock().unwrap() = None;
         emit_status(app);
-        crate::shell::refresh_tray(app);
         return Ok(());
     }
     if rec.starting.swap(true, Ordering::SeqCst) {
@@ -257,7 +258,6 @@ pub fn start(app: &AppHandle) -> AppResult<()> {
         }
     }
     emit_status(app);
-    crate::shell::refresh_tray(app);
     res
 }
 
@@ -277,7 +277,10 @@ fn start_inner(app: &AppHandle) -> AppResult<()> {
         match (&target, &game, cs.app_audio_only) {
             (_, Some(g), true) => audio.push((AudioSource::Process(g.pid), "Игра".into())),
             (Target::Window(w), None, true) => audio.push((AudioSource::Process(w.pid), "Игра".into())),
-            _ => audio.push((AudioSource::System, "Системный звук".into())),
+            _ => {
+                let output = (!cs.audio_output.is_empty()).then(|| cs.audio_output.clone());
+                audio.push((AudioSource::System(output), "Системный звук".into()));
+            }
         }
     }
     // Отдельные дорожки выбранных приложений (без дублей с дорожкой игры).
@@ -450,7 +453,6 @@ pub fn stop_session(app: &AppHandle) {
         }
     }
     emit_status(app);
-    crate::shell::refresh_tray(app);
 }
 
 // ---------- Сохранение ----------
@@ -507,8 +509,9 @@ fn notify_saved(app: &AppHandle, path: &Path, duration: f64, kind: &str) {
     let state = app.state::<AppState>();
     let p = path.to_string_lossy().into_owned();
     *state.recorder.last_clip.lock().unwrap() = Some(p.clone());
-    if state.settings().capture.sound {
-        sources::beep();
+    let settings = state.settings().capture;
+    if settings.sound {
+        super::sound::notify(settings.sound_file, settings.sound_volume);
     }
     let clip = ClipSaved { path: p, duration, kind: kind.into() };
     {
@@ -579,28 +582,26 @@ pub fn toggle_record(app: &AppHandle) -> AppResult<bool> {
     if state.recorder.session.lock().unwrap().is_none() {
         start(app)?;
     }
-    let (stopped, tracks) = {
+    let (now_recording, stopped, tracks) = {
         let g = state.recorder.session.lock().unwrap();
         let s = g.as_ref().ok_or_else(|| AppError::msg("Захват не запущен"))?;
         let mut ring = s.ring.lock().unwrap();
         if ring.recording_secs().is_some() {
             let stopped = ring.stop_recording();
             let tracks = stopped.as_ref().map(|(_, d)| s.tracks_for(*d)).unwrap_or_default();
-            (stopped, tracks)
+            (false, stopped, tracks)
         } else {
             let dir = recordings_dir(app);
             std::fs::create_dir_all(&dir)?;
             let stem = format!("{}_{}", s.prefix, sources::local_stamp());
             ring.start_recording(unique(&dir, &stem, "ts"))?;
-            (None, Vec::new())
+            (true, None, Vec::new())
         }
     };
-    let now_recording = stopped.is_none();
     if let Some((ts, dur)) = stopped {
         finish_recording(app, ts, dur, tracks);
     }
     emit_status(app);
-    crate::shell::refresh_tray(app);
     Ok(now_recording)
 }
 
@@ -627,6 +628,7 @@ pub fn status(app: &AppHandle) -> CaptureStatus {
         uptime_secs: 0.0,
         error: rec.last_error.lock().unwrap().clone(),
         audio_errors: Vec::new(),
+        audio_signal: None,
         last_clip: rec.last_clip.lock().unwrap().clone(),
         ffmpeg_pid: None,
         waiting_for_game: g.is_none()
@@ -655,6 +657,9 @@ pub fn status(app: &AppHandle) -> CaptureStatus {
         st.uptime_secs = s.started.elapsed().as_secs_f64();
         st.ffmpeg_pid = Some(s.ffmpeg_pid);
         st.gpu_priority = s.gpu_priority.map(String::from);
+        if !s._audio.is_empty() {
+            st.audio_signal = Some(s._audio.iter().any(|feed| feed.audible_within(2.0)));
+        }
         st.audio_errors = s
             .audio_errors
             .iter()
@@ -677,7 +682,9 @@ pub fn status(app: &AppHandle) -> CaptureStatus {
 }
 
 pub fn emit_status(app: &AppHandle) {
-    let _ = app.emit("capture-status", status(app));
+    let status = status(app);
+    crate::shell::refresh_tray(app, &status);
+    let _ = app.emit("capture-status", status);
 }
 
 /// Фоновый поток: раз в секунду — FPS/битрейт, контроль жизни FFmpeg, автоперезапуск.
@@ -744,7 +751,6 @@ pub fn spawn_monitor(app: AppHandle) {
                 if allow && game_ok && rec.wanted.load(Ordering::Relaxed) {
                     let _ = start(&app);
                 }
-                crate::shell::refresh_tray(&app);
             }
             emit_status(&app);
         })
@@ -760,7 +766,8 @@ pub fn capture_sources() -> CaptureSources {
         gpu,
         monitors,
         windows: sources::windows(),
-        mics: list_inputs(),
+        mics: list_devices(&wasapi::Direction::Capture),
+        audio_outputs: list_devices(&wasapi::Direction::Render),
         audio_apps: super::audio::list_audio_apps(),
     }
 }
@@ -804,20 +811,34 @@ pub async fn capture_toggle_record(app: AppHandle) -> AppResult<bool> {
         .map_err(|e| AppError::msg(e.to_string()))?
 }
 
-/// Сохранить настройки захвата, перерегистрировать хоткеи и перезапустить захват, если он шёл.
+/// Сохранить настройки. Изменения сигнала сохранения не прерывают захват.
 #[tauri::command]
 pub async fn capture_apply_settings(
     app: AppHandle,
     state: State<'_, AppState>,
-    capture: CaptureSettings,
+    mut capture: CaptureSettings,
 ) -> AppResult<Vec<String>> {
-    {
-        state.settings.write().unwrap().capture = capture;
+    capture.sound_volume = capture.sound_volume.min(100);
+    let previous = state.settings().capture;
+    if capture.sound && (!previous.sound || capture.sound_file != previous.sound_file) {
+        let path = capture.sound_file.clone();
+        tauri::async_runtime::spawn_blocking(move || super::sound::prepare(&path))
+            .await
+            .map_err(|e| AppError::msg(e.to_string()))??;
     }
+    let restart = {
+        let mut settings = state.settings.write().unwrap();
+        settings.capture.sound = capture.sound;
+        settings.capture.sound_file.clone_from(&capture.sound_file);
+        settings.capture.sound_volume = capture.sound_volume;
+        let restart = settings.capture != capture;
+        settings.capture = capture;
+        restart
+    };
     persist(&state)?;
     let hotkey_errors = crate::shell::register_hotkeys(&app);
     let running = state.recorder.session.lock().unwrap().is_some();
-    if running {
+    if running && restart {
         let a = app.clone();
         tauri::async_runtime::spawn_blocking(move || {
             stop(&a);
@@ -844,7 +865,7 @@ mod tests {
         let target = Target::Monitor(monitors[0].clone());
         let enc = EncoderInfo { name: "h264_amf".into(), vendor: "amf".into(), codec: "h264".into(), hardware: true };
         let audio = vec![
-            (AudioSource::System, "Системный звук".to_string()),
+            (AudioSource::System(None), "Системный звук".to_string()),
             (AudioSource::App("Discord.exe".into()), "Discord".into()),
             (AudioSource::App("Яндекс Музыка.exe".into()), "Яндекс Музыка".into()),
             (AudioSource::Mic(None, super::super::audio::MicFx { noise: true, echo: false }), "Микрофон".into()),
