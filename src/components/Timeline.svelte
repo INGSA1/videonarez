@@ -11,10 +11,12 @@
   const HANDLE = 14;
   const TOP_T = RULER;
   const TOP_W = RULER + THUMB + GAP;
-  // Звук: одна дорожка — общая волна; несколько — по полосе на каждую.
+  // В компактном виде показываем волну выбранной дорожки.
   const AL = 30;
   const AGAP = 2;
-  const nTracks = $derived(Math.max(1, app.meta?.audioTracks.length ?? 1));
+  let showTracks = $state(false);
+  const trackCount = $derived(app.meta?.audioTracks.length ?? 0);
+  const nTracks = $derived(showTracks ? Math.max(1, trackCount) : 1);
   const WAVE = $derived(nTracks > 1 ? nTracks * AL + (nTracks - 1) * AGAP : 46);
   const TOP_L = $derived(TOP_W + WAVE + GAP);
   const H = $derived(TOP_L + LANE + 6);
@@ -143,7 +145,7 @@
       ctx.fillStyle = C.track;
       ctx.fillRect(0, y0, width, laneH);
       const wf = multi ? app.waveforms[k] : app.waveform;
-      const opt = app.opts.tracks[k];
+      const opt = app.opts.tracks[multi ? k : app.waveTrack];
       const on = !opt || opt.enabled;
       const gain = Math.min(2, opt?.volume ?? 1);
       if (wf && wf.peaks.length) {
@@ -158,7 +160,7 @@
           let mx = 0;
           for (let i = Math.max(0, a); i < Math.min(n, b); i++) if (wf.peaks[i] > mx) mx = wf.peaks[i];
           // квадрат — визуально контрастнее; громкость дорожки меняет высоту волны
-          const hh = Math.min(laneH / 2 - 2, (mx * mx * (laneH - 6)) / 2 * (multi ? gain : 1));
+          const hh = Math.min(laneH / 2 - 2, (mx * mx * (laneH - 6)) / 2 * (trackCount > 1 ? gain : 1));
           if (hh < 0.4) continue;
           ctx.fillStyle = ta >= r.start && ta <= r.end ? C.waveIn : C.wave;
           ctx.fillRect(x, mid - hh, 1, hh * 2);
@@ -454,24 +456,27 @@
 
 <div class="timeline">
   <div class="bar">
-    <div class="legend">
-      <span class="dim">Колесо мыши меняет масштаб, с Shift прокручивает. Двойной щелчок по метке громкости создаёт клип вокруг неё.</span>
-    </div>
+    <span class="dim" title="Колесо мыши меняет масштаб, с Shift прокручивает.">Перетащите края выделения</span>
     <div class="tools">
-      {#if app.meta && app.meta.audioTracks.length > 1}
-        <select value={app.waveTrack} onchange={(e) => loadWaveform(Number((e.target as HTMLSelectElement).value))} title="С какой дорожки брать метки громких моментов">
-          {#each app.meta.audioTracks as t (t.index)}
-            <option value={t.index}>Метки по: {t.title || `дорожка ${t.index + 1}`}</option>
-          {/each}
-        </select>
+      {#if trackCount > 1}
+        <button class="tracks-toggle ghost" class:active={showTracks} aria-expanded={showTracks}
+          onclick={() => (showTracks = !showTracks)}><Icon name="volume" size={14} /> Дорожки ({trackCount})</button>
       {/if}
       <button class="ghost icon" title="Уменьшить (−)" onclick={() => zoom(1.5)}><Icon name="zoomOut" /></button>
       <button class="ghost icon" title="Увеличить (+)" onclick={() => zoom(1 / 1.5)}><Icon name="zoomIn" /></button>
       <button class="ghost icon" title="Весь ролик (0)" onclick={fit}><Icon name="fit" /></button>
     </div>
   </div>
-  {#if app.meta && app.meta.audioTracks.length > 1}
+  {#if showTracks && app.meta && trackCount > 1}
     <div class="mixer" aria-label="Звуковые дорожки">
+      <label class="marker-source">
+        Метки громких моментов
+        <select value={app.waveTrack} onchange={(e) => loadWaveform(Number(e.currentTarget.value))}>
+          {#each app.meta.audioTracks as t (t.index)}
+            <option value={t.index}>{t.title || `Дорожка ${t.index + 1}`}</option>
+          {/each}
+        </select>
+      </label>
       {#each app.meta.audioTracks as t (t.index)}
         {@const o = app.opts.tracks[t.index]}
         {#if o}
@@ -511,31 +516,43 @@
 
 <style>
   .timeline {
+    flex-shrink: 0;
+    max-height: 48%;
+    overflow: auto;
     background: var(--panel);
     border-top: 1px solid var(--line);
   }
   .bar {
+    position: sticky;
+    top: 0;
+    z-index: 1;
     display: flex;
     align-items: center;
     justify-content: space-between;
     padding: 4px 10px;
     font-size: 11px;
     gap: 10px;
-  }
-  .legend {
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
+    background: var(--panel);
   }
   .tools {
     display: flex;
     align-items: center;
     gap: 2px;
   }
-  .tools select {
-    font-size: 11px;
-    padding: 2px 6px;
-    margin-right: 6px;
+  .tracks-toggle {
+    margin-right: 4px;
+    font-size: 12px;
+  }
+  .marker-source {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-2);
+    font-size: 12px;
+  }
+  .marker-source select {
+    max-width: 185px;
   }
   .mixer {
     display: flex;

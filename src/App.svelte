@@ -3,7 +3,7 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import {
     app, init, openFileDialog, openPath, togglePlay, step, skip, setIn, setOut, addSegment,
-    removeSegment, playRange, startExport, scheduleSave, player, VIDEO_EXT, installUpdate,
+    removeSegment, playRange, startExport, exportAction, scheduleSave, player, VIDEO_EXT, installUpdate,
   } from "./lib/store.svelte";
   import { fmtBytes, codecLabel, fmtTime } from "./lib/format";
   import VideoPlayer from "./components/VideoPlayer.svelte";
@@ -71,7 +71,9 @@
   });
 
   function onKey(e: KeyboardEvent) {
-    const tag = (e.target as HTMLElement)?.tagName;
+    if (e.defaultPrevented) return;
+    const target = e.target instanceof HTMLElement ? e.target : null;
+    const tag = target?.tagName;
     const typing = tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA";
     if (e.ctrlKey && e.code === "KeyO") {
       e.preventDefault();
@@ -84,6 +86,7 @@
       return;
     }
     if (typing || app.showSettings || app.mode !== "editor" || !app.meta) return;
+    if ((e.key === "Enter" || e.key === " ") && target?.matches("button:focus-visible, summary")) return;
     const handled = () => e.preventDefault();
     switch (e.code) {
       case "Space": handled(); togglePlay(); break;
@@ -98,7 +101,7 @@
       case "KeyM": handled(); if (player.el) player.el.muted = !player.el.muted; break;
       case "Enter": case "NumpadEnter": handled(); if (app.selectedId === null) addSegment(); break;
       case "Delete": if (app.selectedId !== null) { handled(); removeSegment(app.selectedId); } break;
-      case "Escape": app.selectedId = null; break;
+      case "Escape": if (app.editingFrame) app.editingFrame = false; else app.selectedId = null; break;
       case "Equal": case "NumpadAdd": handled(); timeline?.zoom(1 / 1.5); break;
       case "Minus": case "NumpadSubtract": handled(); timeline?.zoom(1.5); break;
       case "Digit0": case "Numpad0": handled(); timeline?.fit(); break;
@@ -130,7 +133,7 @@
         </div>
       {/if}
       <div class="spacer" data-tauri-drag-region></div>
-      <button onclick={openFileDialog} title="Ctrl+O"><Icon name="open" /> Открыть видео</button>
+      {#if app.meta}<button onclick={openFileDialog} title="Ctrl+O"><Icon name="open" /> Открыть видео</button>{/if}
     {:else}
       <div class="spacer" data-tauri-drag-region></div>
     {/if}
@@ -176,46 +179,44 @@
           <div class="welcome">
             <div class="drop" class:over={app.dragOver}>
               <h2>Перетащите видео в окно</h2>
-              <p>Подойдёт запись из игры, MP4, MKV, MOV или WebM. Файл не загружается в память целиком, поэтому даже двухчасовой стрим открывается сразу.</p>
+              <p>Откройте запись, чтобы вырезать и сохранить нужный момент.</p>
               <button class="primary" onclick={openFileDialog} disabled={app.loading}>
                 <Icon name="open" /> {app.loading ? "Открываю" : "Открыть видео"}
               </button>
             </div>
-            <dl class="keys">
-              <div><dt><kbd>I</kbd> <kbd>O</kbd></dt><dd>начало и конец клипа</dd></div>
-              <div><dt><kbd>Enter</kbd></dt><dd>добавить клип в список</dd></div>
-              <div><dt><kbd>Пробел</kbd></dt><dd>пуск и пауза</dd></div>
-              <div><dt><kbd>Ctrl</kbd> <kbd>E</kbd></dt><dd>экспорт</dd></div>
-            </dl>
           </div>
         {/if}
       </div>
 
-      <aside>
-        <nav class="tabs">
-          <button class:on={app.tab === "clips"} onclick={() => (app.tab = "clips")}>
-            Клипы {#if app.segments.length}<span class="count">{app.segments.length}</span>{/if}
-          </button>
-          <button class:on={app.tab === "export"} onclick={() => (app.tab = "export")}>Экспорт</button>
-          <button class:on={app.tab === "queue"} onclick={() => (app.tab = "queue")}>
-            Очередь {#if activeJobs}<span class="count">{activeJobs}</span>{/if}
-          </button>
-        </nav>
-        <div class="side-body">
-          {#if app.tab === "clips"}
-            <SegmentList />
-          {:else if app.tab === "export"}
-            <ExportPanel />
-          {:else}
-            <QueuePanel />
-          {/if}
-        </div>
-        {#if app.tab === "clips" && app.meta}
-          <div class="side-foot">
-            <button class="primary" onclick={() => (app.tab = "export")}>Перейти к экспорту</button>
+      {#if app.meta || app.queue.length}
+        <aside>
+          <nav class="tabs">
+            <button class:on={app.tab === "clips"} onclick={() => (app.tab = "clips")}>
+              Клипы {#if app.segments.length}<span class="count">{app.segments.length}</span>{/if}
+            </button>
+            <button class:on={app.tab === "export"} onclick={() => (app.tab = "export")}>Экспорт</button>
+            <button class:on={app.tab === "queue"} onclick={() => (app.tab = "queue")}>
+              Очередь {#if activeJobs}<span class="count">{activeJobs}</span>{/if}
+            </button>
+          </nav>
+          <div class="side-body" class:export-body={app.tab === "export"}>
+            {#if app.tab === "clips"}
+              <SegmentList />
+            {:else if app.tab === "export"}
+              <ExportPanel />
+            {:else}
+              <QueuePanel />
+            {/if}
           </div>
-        {/if}
-      </aside>
+          {#if app.tab === "clips" && app.meta}
+            <div class="side-foot">
+              <button class="primary" onclick={startExport}
+                disabled={!app.settings || (!app.segments.length && app.outPoint <= app.inPoint)}
+                title="Сохранить с текущими настройками (Ctrl+E)">{exportAction()}</button>
+            </div>
+          {/if}
+        </aside>
+      {/if}
     {/if}
   </main>
 
@@ -408,6 +409,10 @@
     display: flex;
     flex-direction: column;
   }
+  .side-body.export-body {
+    overflow: hidden;
+    padding: 0;
+  }
   .side-foot {
     padding: 12px 16px;
     border-top: 1px solid var(--line);
@@ -423,8 +428,7 @@
     flex: 1;
     display: grid;
     align-content: center;
-    justify-items: start;
-    gap: 28px;
+    justify-items: center;
     padding: 48px clamp(24px, 8vw, 120px);
   }
   .drop {
@@ -434,7 +438,8 @@
     border-radius: var(--radius-lg);
     display: grid;
     gap: 14px;
-    justify-items: start;
+    justify-items: center;
+    text-align: center;
   }
   .drop.over {
     border-color: var(--cue);
@@ -456,25 +461,6 @@
     margin-top: 6px;
     padding: 10px 16px;
   }
-  .keys {
-    margin: 0;
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 240px));
-    gap: 8px 32px;
-    color: var(--text-3);
-  }
-  .keys div {
-    display: flex;
-    gap: 10px;
-    align-items: center;
-  }
-  .keys dt {
-    min-width: 64px;
-  }
-  .keys dd {
-    margin: 0;
-  }
-
   .dragmask {
     position: fixed;
     inset: 0;

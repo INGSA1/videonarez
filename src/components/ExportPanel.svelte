@@ -1,6 +1,6 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
-  import { app, startExport, cancelExport, reveal, applyPreset, exportSegments, saveSettings, copyForDiscord, clipsDir, videoCrop } from "../lib/store.svelte";
+  import { app, startExport, cancelExport, reveal, applyPreset, exportAction, exportSegments, saveSettings, copyForDiscord, clipsDir, videoCrop } from "../lib/store.svelte";
   import { ASPECTS, PRESETS, HEIGHTS, VERTICAL_HEIGHTS, FPS_OPTIONS } from "../lib/presets";
   import { fmtTime, fmtBytes, fmtDur } from "../lib/format";
   import Icon from "./Icon.svelte";
@@ -10,10 +10,10 @@
   const m = $derived(app.meta);
   const encoders = $derived(app.settings?.encoders ?? []);
 
-  const MODES: { id: TrimMode; label: string; icon: string; hint: string }[] = [
-    { id: "copy", label: "Мгновенно", icon: "bolt", hint: "Без перекодирования: почти без нагрузки и без потери качества. Режет по ключевым кадрам, поэтому начало может сдвинуться на долю секунды." },
-    { id: "smart", label: "Точно", icon: "target", hint: "Перекодируется только кусочек до первого ключевого кадра, остальное копируется. Точность до кадра за 1–2 секунды." },
-    { id: "encode", label: "Перекодировать", icon: "chip", hint: "Полное перекодирование на видеокарте: разрешение, частота кадров, кадрирование, размер под Discord." },
+  const MODES: { id: TrimMode; label: string; hint: string }[] = [
+    { id: "copy", label: "Быстро, исходное качество", hint: "Сохраняет исходное качество. Начало клипа может немного сдвинуться." },
+    { id: "smart", label: "Точно по кадрам", hint: "Сохраняет начало клипа по выбранному кадру." },
+    { id: "encode", label: "С настройками качества", hint: "Можно выбрать разрешение, качество и размер файла." },
   ];
 
   const VENDORS: Record<Vendor, string> = { nvenc: "NVIDIA NVENC", amf: "AMD AMF", qsv: "Intel QuickSync", cpu: "Процессор (x264, x265)" };
@@ -36,6 +36,7 @@
 
   const crop = $derived(videoCrop());
   const mode = $derived(crop ? "encode" : o.mode);
+  const profile = $derived(Object.hasOwn(PRESETS, o.preset) ? o.preset : mode);
   const frameWidth = $derived(crop?.frameSize.w ?? m?.displayWidth ?? 0);
   const frameHeight = $derived(crop?.frameSize.h ?? m?.displayHeight ?? 0);
   const vertical = $derived(frameHeight > frameWidth);
@@ -52,17 +53,13 @@
   // Оценка размера
   const estimate = $derived.by(() => {
     if (!m) return "";
-    const per = o.merge ? totalDur : Math.max(...segs.map((s) => s.end - s.start));
     if (mode !== "encode") {
       const br = m.bitRate ?? (m.sizeBytes * 8) / m.duration;
       return `≈ ${fmtBytes((br / 8) * totalDur)} всего`;
     }
-    if (o.rate === "size") {
-      const kbps = (o.targetMb * 8192) / Math.max(0.1, per) * 0.97 - (o.mute ? 0 : o.audioBitrateKbps);
-      return `Не больше ${o.targetMb} МБ на файл, видео около ${Math.max(0, Math.round(kbps))} кбит/с`;
-    }
+    if (o.rate === "size") return `Целевой размер до ${o.targetMb} МБ на файл`;
     if (o.rate === "bitrate") return `≈ ${fmtBytes(((o.bitrateKbps + (o.mute ? 0 : o.audioBitrateKbps)) * 1000 / 8) * totalDur)} всего`;
-    return "размер зависит от динамики сцены";
+    return "";
   });
 
   async function pickDir() {
@@ -73,9 +70,14 @@
     }
   }
 
-  function setMode(id: TrimMode) {
-    o.mode = id;
-    o.preset = "custom";
+  function chooseProfile(key: string) {
+    const method = MODES.find((entry) => entry.id === key);
+    if (method) {
+      o.mode = method.id;
+      custom();
+    } else {
+      applyPreset(key);
+    }
   }
 
   function custom() {
@@ -83,192 +85,194 @@
   }
 
   const curJob = $derived(app.queue.find((j) => j.id === app.currentJob));
-  const activeJobs = $derived(app.queue.filter((j) => j.status === "queued" || j.status === "running").length);
-  const queueBusy = $derived(activeJobs > 0);
   const queuePos = $derived(
     curJob ? app.queue.filter((j) => j.id < curJob.id && (j.status === "queued" || j.status === "running")).length : 0,
   );
 
   const qualityLabel = $derived(o.quality <= 18 ? "почти без потерь" : o.quality <= 22 ? "высокое" : o.quality <= 27 ? "среднее" : "низкое, маленький файл");
+  let options: HTMLDivElement;
+  $effect(() => {
+    if (app.result && options) options.scrollTop = 0;
+  });
 </script>
 
 <div class="panel">
-  <!-- Режим -->
-  <section>
-    <div class="modes">
-      {#each MODES as md (md.id)}
-        <button class="mode" class:active={mode === md.id} disabled={!!crop && md.id !== "encode"}
-          onclick={() => setMode(md.id)} title={md.hint}>
-          <Icon name={md.icon} size={18} />
-          <span>{md.label}</span>
-        </button>
-      {/each}
-    </div>
-    <p class="hint dim">{crop ? "Кадрирование требует перекодирования." : MODES.find((x) => x.id === mode)?.hint}</p>
-  </section>
-
-  {#if m?.hasVideo}
-    <section>
-      <button class="dir" onclick={() => (app.editingFrame = true)}>
-        <Icon name="crop" /> Настроить кадр{#if crop} · {o.cropZoom}%{/if}
-      </button>
-    </section>
-  {/if}
-
-  {#if mode === "encode"}
-    <section>
-      <h3 class="h">Пресет</h3>
-      <div class="presets">
-        {#each Object.entries(PRESETS) as [key, p] (key)}
-          <button class="chip" class:active={o.preset === key} title={p.hint} onclick={() => applyPreset(key)}>{p.label}</button>
+  <div class="export-options" bind:this={options}>
+    {#if app.result}
+      <div class="result">
+        <div class="ok" role="status"><Icon name="check" /> {app.result.files.length === 1 ? "Клип сохранён" : "Клипы сохранены"}</div>
+        {#each app.result.files as f (f)}
+          <button class="ghost file" onclick={() => reveal(f)} title="Показать в проводнике">
+            <Icon name="folder" size={14} /> <span class="path">{f.split(/[\\/]/).pop()}</span>
+          </button>
+          <button class="discord" onclick={() => copyForDiscord(f)} title="Скопировать файл, чтобы вставить в Discord через Ctrl+V">
+            <Icon name="copy" /> Скопировать для Discord
+          </button>
         {/each}
+        {#each app.result.notes as n (n)}<p class="note">{n}</p>{/each}
       </div>
-    </section>
+    {/if}
 
-    <section class="grid">
-      <label>
-        <span>Кодек</span>
-        <div class="seg">
-          {#each CODECS as c (c.id)}
-            <button class:active={o.codec === c.id} disabled={!codecAvailable(c.id)} onclick={() => { o.codec = c.id; custom(); }}>{c.label}</button>
-          {/each}
-        </div>
-      </label>
-      <label>
-        <span>Кодировщик</span>
-        <select bind:value={o.encoder} onchange={custom}>
-          <option value="auto">{activeEncoder && o.encoder === "auto" ? `Выбрать сам (${VENDORS[activeEncoder.vendor]})` : "Выбрать сам"}</option>
-          {#each vendorsFor as v (v)}<option value={v}>{VENDORS[v]}</option>{/each}
-        </select>
-      </label>
-      <label>
-        <span>Разрешение</span>
-        <select bind:value={o.height} onchange={custom}>
-          <option value={null}>Исходное</option>
-          {#each heights as h (h)}<option value={h}>{vertical ? `${widthAt(h)}×${h}` : `${h}p`}</option>{/each}
-        </select>
-      </label>
-      <label>
-        <span>FPS</span>
-        <select bind:value={o.fps} onchange={custom}>
-          <option value={null}>Исходный{m ? ` (${+m.fps.toFixed(2)})` : ""}</option>
-          {#each FPS_OPTIONS as f (f)}<option value={f}>{f}</option>{/each}
-        </select>
-      </label>
-    </section>
-
-    <section>
-      <h3 class="h">Качество / размер</h3>
-      <div class="seg wide">
-        <button class:active={o.rate === "quality"} onclick={() => { o.rate = "quality"; custom(); }}>Качество</button>
-        <button class:active={o.rate === "bitrate"} onclick={() => { o.rate = "bitrate"; custom(); }}>Битрейт</button>
-        <button class:active={o.rate === "size"} onclick={() => { o.rate = "size"; custom(); }}>Размер файла</button>
-      </div>
-      {#if o.rate === "quality"}
-        <div class="slider">
-          <input type="range" min="14" max="36" step="1" bind:value={o.quality} oninput={custom} />
-          <span class="mono val">{o.quality}</span>
-        </div>
-        <p class="hint dim">Чем меньше число, тем лучше: {qualityLabel}.</p>
-      {:else if o.rate === "bitrate"}
-        <div class="inline">
-          <input type="number" min="0.5" max="100" step="0.5" value={o.bitrateKbps / 1000}
-            onchange={(e) => { o.bitrateKbps = Math.round(Number(e.currentTarget.value) * 1000); custom(); }} />
-          <span class="dim">Мбит/с</span>
-        </div>
-      {:else}
-        <div class="inline">
-          <input type="number" min="1" max="4000" step="1" bind:value={o.targetMb} oninput={custom} />
-          <span class="dim">МБ на файл</span>
-          {#each [8, 10, 25, 50] as mb (mb)}
-            <button class="chip small" class:active={o.targetMb === mb} onclick={() => { o.targetMb = mb; custom(); }}>{mb}</button>
-          {/each}
-        </div>
-      {/if}
-    </section>
-
-  {/if}
-
-  {#if m && m.audioTracks.length}
-    <section>
-      <h3 class="h">Звук</h3>
-      <label class="check"><input type="checkbox" bind:checked={o.mute} /> Без звука</label>
-      {#if !o.mute}
-        {#each m.audioTracks as t (t.index)}
-          {@const to = o.tracks[t.index]}
-          {#if to}
-            <div class="track">
-              <label class="check">
-                <input type="checkbox" bind:checked={to.enabled} />
-                {t.title || `Дорожка ${t.index + 1}`}
-              </label>
-              {#if o.mode === "encode"}
-                <input type="range" min="0" max="2" step="0.05" bind:value={to.volume} disabled={!to.enabled} />
-                <span class="mono val">{Math.round(to.volume * 100)}%</span>
-              {/if}
-            </div>
-          {/if}
-        {/each}
-        {#if m.audioTracks.length > 1}
-          {#if o.mode === "encode"}
-            <div class="seg">
-              <button class:active={o.mixdown} onclick={() => (o.mixdown = true)}>Свести в одну</button>
-              <button class:active={!o.mixdown} onclick={() => (o.mixdown = false)}>Оставить раздельными</button>
-            </div>
-            <p class="hint dim">
-              {o.mixdown
-                ? "Включённые дорожки смешаются с выставленной громкостью. Так клип звучит одинаково в любом плеере и в Discord."
-                : "Каждая включённая дорожка останется отдельной, с выставленной громкостью и своим названием."}
-            </p>
-          {:else}
-            <p class="hint dim">Отмеченные дорожки копируются без изменений. Чтобы менять громкость или свести их в одну, выберите «Перекодировать».</p>
-          {/if}
-        {/if}
-        {#if o.mode === "encode"}
-          <label class="row">
-            <span>Битрейт звука</span>
-            <select bind:value={o.audioBitrateKbps}>
-              {#each [64, 96, 128, 160, 192, 256, 320] as b (b)}<option value={b}>{b} кбит/с</option>{/each}
-            </select>
-          </label>
-        {/if}
-      {/if}
-    </section>
-  {/if}
-
-  <section class="grid">
-    <label>
-      <span>Контейнер</span>
-      <div class="seg">
-        <button class:active={o.container === "mp4"} onclick={() => (o.container = "mp4")}>MP4</button>
-        <button class:active={o.container === "mkv"} onclick={() => (o.container = "mkv")}>MKV</button>
-      </div>
-    </label>
     <label>
       <span>Имя файла</span>
       <input bind:value={app.baseName} />
     </label>
-  </section>
+    <section>
+      <label>
+        <span>Как сохранить</span>
+        <select value={profile} onchange={(e) => chooseProfile(e.currentTarget.value)}>
+          <optgroup label="Способ сохранения">
+            {#each MODES as md (md.id)}
+              <option value={md.id} disabled={!!crop && md.id !== "encode"}>{md.label}</option>
+            {/each}
+          </optgroup>
+          <optgroup label="Готовые профили">
+            {#each Object.entries(PRESETS) as [key, p] (key)}
+              <option value={key}>{p.label}</option>
+            {/each}
+          </optgroup>
+        </select>
+      </label>
+      <p class="hint dim">{crop ? "Кадрирование применится при сохранении." : PRESETS[profile]?.hint ?? MODES.find((x) => x.id === mode)?.hint}</p>
+    </section>
+    <section>
+      <span class="field-name">Папка сохранения</span>
+      <button class="dir" onclick={pickDir} title={clipsDir() || "Выбрать папку сохранения"}>
+        <Icon name="folder" /> <span class="path">{clipsDir() || "Выбрать папку"}</span>
+      </button>
+    </section>
+    {#if segs.length > 1}
+      <label class="check merge"><input type="checkbox" bind:checked={o.merge} /> Объединить отрезки в один клип</label>
+    {/if}
+    <details>
+      <summary class="disclosure">Дополнительные настройки</summary>
+      <div class="advanced">
+        {#if mode === "encode"}
+          <section class="grid">
+            <label>
+              <span>Кодек</span>
+              <div class="seg">
+                {#each CODECS as c (c.id)}
+                  <button class:active={o.codec === c.id} disabled={!codecAvailable(c.id)} onclick={() => { o.codec = c.id; custom(); }}>{c.label}</button>
+                {/each}
+              </div>
+            </label>
+            <label>
+              <span>Кодировщик</span>
+              <select bind:value={o.encoder} onchange={custom}>
+                <option value="auto">{activeEncoder && o.encoder === "auto" ? `Выбрать сам (${VENDORS[activeEncoder.vendor]})` : "Выбрать сам"}</option>
+                {#each vendorsFor as v (v)}<option value={v}>{VENDORS[v]}</option>{/each}
+              </select>
+            </label>
+            <label>
+              <span>Разрешение</span>
+              <select bind:value={o.height} onchange={custom}>
+                <option value={null}>Исходное</option>
+                {#each heights as h (h)}<option value={h}>{vertical ? `${widthAt(h)}×${h}` : `${h}p`}</option>{/each}
+              </select>
+            </label>
+            <label>
+              <span>FPS</span>
+              <select bind:value={o.fps} onchange={custom}>
+                <option value={null}>Исходный{m ? ` (${+m.fps.toFixed(2)})` : ""}</option>
+                {#each FPS_OPTIONS as f (f)}<option value={f}>{f}</option>{/each}
+              </select>
+            </label>
+          </section>
 
-  {#if segs.length > 1}
-    <label class="check merge"><input type="checkbox" bind:checked={o.merge} /> Склеить {segs.length} клипа(ов) в один хайлайт</label>
-  {/if}
+          <section>
+            <h3 class="h">Качество / размер</h3>
+            <div class="seg wide">
+              <button class:active={o.rate === "quality"} onclick={() => { o.rate = "quality"; custom(); }}>Качество</button>
+              <button class:active={o.rate === "bitrate"} onclick={() => { o.rate = "bitrate"; custom(); }}>Битрейт</button>
+              <button class:active={o.rate === "size"} onclick={() => { o.rate = "size"; custom(); }}>Размер файла</button>
+            </div>
+            {#if o.rate === "quality"}
+              <div class="slider">
+                <input type="range" min="14" max="36" step="1" bind:value={o.quality} oninput={custom} />
+                <span class="mono val">{o.quality}</span>
+              </div>
+              <p class="hint dim">Чем меньше число, тем лучше: {qualityLabel}.</p>
+            {:else if o.rate === "bitrate"}
+              <div class="inline">
+                <input type="number" min="0.5" max="100" step="0.5" value={o.bitrateKbps / 1000}
+                  onchange={(e) => { o.bitrateKbps = Math.round(Number(e.currentTarget.value) * 1000); custom(); }} />
+                <span class="dim">Мбит/с</span>
+              </div>
+            {:else}
+              <div class="inline">
+                <input type="number" min="1" max="4000" step="1" bind:value={o.targetMb} oninput={custom} />
+                <span class="dim">МБ на файл</span>
+                {#each [8, 10, 25, 50] as mb (mb)}
+                  <button class="chip small" class:active={o.targetMb === mb} onclick={() => { o.targetMb = mb; custom(); }}>{mb}</button>
+                {/each}
+              </div>
+            {/if}
+          </section>
 
-  <section>
-    <h3 class="h">Папка</h3>
-    <button class="dir" onclick={pickDir} title="Выбрать общую папку Videonarez. Клипы сохраняются в её подпапку «Клипы», целые записи в «Записи».">
-      <Icon name="folder" /> <span class="path">{clipsDir() || "—"}</span>
-    </button>
-  </section>
+        {/if}
+
+        {#if m && m.audioTracks.length}
+          <section>
+            <h3 class="h">Звук</h3>
+            <label class="check"><input type="checkbox" bind:checked={o.mute} /> Без звука</label>
+            {#if !o.mute}
+              {#each m.audioTracks as t (t.index)}
+                {@const to = o.tracks[t.index]}
+                {#if to}
+                  <div class="track">
+                    <label class="check">
+                      <input type="checkbox" bind:checked={to.enabled} />
+                      {t.title || `Дорожка ${t.index + 1}`}
+                    </label>
+                    {#if mode === "encode"}
+                      <input type="range" min="0" max="2" step="0.05" bind:value={to.volume} disabled={!to.enabled} />
+                      <span class="mono val">{Math.round(to.volume * 100)}%</span>
+                    {/if}
+                  </div>
+                {/if}
+              {/each}
+              {#if m.audioTracks.length > 1}
+                {#if mode === "encode"}
+                  <div class="seg">
+                    <button class:active={o.mixdown} onclick={() => (o.mixdown = true)}>Свести в одну</button>
+                    <button class:active={!o.mixdown} onclick={() => (o.mixdown = false)}>Оставить раздельными</button>
+                  </div>
+                  <p class="hint dim">
+                    {o.mixdown
+                      ? "Включённые дорожки смешаются с выставленной громкостью. Так клип звучит одинаково в любом плеере и в Discord."
+                      : "Каждая включённая дорожка останется отдельной, с выставленной громкостью и своим названием."}
+                  </p>
+                {:else}
+                  <p class="hint dim">Для изменения громкости или сведения дорожек выберите «С настройками качества».</p>
+                {/if}
+              {/if}
+              {#if mode === "encode"}
+                <label class="row">
+                  <span>Битрейт звука</span>
+                  <select bind:value={o.audioBitrateKbps}>
+                    {#each [64, 96, 128, 160, 192, 256, 320] as b (b)}<option value={b}>{b} кбит/с</option>{/each}
+                  </select>
+                </label>
+              {/if}
+            {/if}
+          </section>
+        {/if}
+
+        <label>
+          <span>Формат файла</span>
+          <select bind:value={o.container}>
+            <option value="mp4">MP4</option>
+            <option value="mkv">MKV</option>
+          </select>
+        </label>
+      </div>
+    </details>
+  </div>
 
   <div class="footer">
-    <div class="summary">
-      <div><b>{files === 1 ? "Один файл" : `Файлов: ${files}`}</b>, <span class="mono">{fmtDur(totalDur)}</span>{#if mode === "encode" && m}, {outRes}, {o.codec.toUpperCase()}{/if}</div>
-      <div class="dim">{estimate}</div>
-    </div>
-
     {#if app.exporting && curJob?.status === "running"}
-      <div class="progress">
+      <div class="progress" role="status">
         <div class="pbar"><span style="width:{app.progress.percent}%"></span></div>
         <div class="pinfo">
           <span>{app.progress.stage}{app.progress.total > 1 ? `, клип ${app.progress.current} из ${app.progress.total}` : ""}</span>
@@ -277,65 +281,56 @@
         <button onclick={() => cancelExport()}><Icon name="x" /> Отменить</button>
       </div>
     {:else if app.exporting && curJob?.status === "queued"}
-      <div class="progress">
-        <div class="pinfo"><span>В очереди, перед ним заданий: {queuePos}</span></div>
+      <div class="progress" role="status">
+        <div class="pinfo"><span>{queuePos ? `Заданий перед этим: ${queuePos}` : "Ожидает начала"}</span></div>
         <button onclick={() => cancelExport()}><Icon name="x" /> Убрать из очереди</button>
       </div>
     {/if}
-    <button class="primary go" disabled={!m || totalDur <= 0} onclick={startExport}>
-      <Icon name="scissors" /> {queueBusy ? "Добавить в очередь" : "Экспортировать"} <kbd>Ctrl+E</kbd>
-    </button>
-    {#if queueBusy}
-      <button class="ghost qlink" onclick={() => (app.tab = "queue")}>Открыть очередь, заданий в работе: {activeJobs}</button>
-    {/if}
-
-    {#if app.result}
-      <div class="result">
-        <div class="ok"><Icon name="check" /> Готово за {app.result.elapsedSec.toFixed(1)} с</div>
-        {#each app.result.files as f (f)}
-          <button class="ghost file" onclick={() => reveal(f)} title="Показать в проводнике">
-            <Icon name="folder" size={14} /> <span class="path">{f.split(/[\\/]/).pop()}</span>
-          </button>
-          <button class="primary discord" onclick={() => copyForDiscord(f)} title="Кладёт файл в буфер обмена. В Discord нажмите Ctrl+V.">
-            Скопировать для Discord
-          </button>
-        {/each}
-        {#each app.result.notes as n (n)}<p class="note">{n}</p>{/each}
+    {#if m}
+      <div class="summary">
+        <div><b>{files === 1 ? "Один клип" : `Файлов: ${files}`}</b> · {fmtDur(totalDur)}{#if mode === "encode"} · {outRes}{/if}</div>
+        {#if estimate}<div class="dim">{estimate}</div>{/if}
       </div>
     {/if}
+    <button class="primary go" disabled={!m || !app.settings || totalDur <= 0} onclick={startExport} title="Ctrl+E">
+      {exportAction()}
+    </button>
   </div>
 </div>
 
 <style>
   .panel {
+    flex: 1;
+    min-height: 0;
     display: flex;
     flex-direction: column;
+  }
+  .export-options {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 16px;
+    display: grid;
     gap: 14px;
+    align-content: start;
   }
   section {
     display: grid;
     gap: 8px;
   }
-  .modes {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 6px;
-  }
-  .mode {
-    flex-direction: column;
-    gap: 4px;
-    padding: 10px 4px;
-    justify-content: center;
-    font-size: 12px;
-  }
   .hint {
     margin: 0;
     font-size: 12px;
   }
-  .presets {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 5px;
+  details {
+    border: 1px solid var(--line-2);
+    border-radius: var(--radius-lg);
+  }
+  .advanced {
+    padding: 12px;
+    border-top: 1px solid var(--line);
+    display: grid;
+    gap: 14px;
   }
   .chip {
     padding: 5px 9px;
@@ -350,7 +345,7 @@
     grid-template-columns: 1fr 1fr;
     gap: 10px;
   }
-  label {
+  label, .field-name {
     display: grid;
     gap: 4px;
     font-size: 12px;
@@ -425,14 +420,9 @@
     direction: rtl;
     text-align: left;
   }
-  /* Прилипает к самому низу прокручиваемой панели: отступ панели (16px) уходит внутрь
-     подвала, иначе под кнопкой просвечивало содержимое, прокрученное под неё. */
   .footer {
-    position: sticky;
-    bottom: -16px;
     display: grid;
     gap: 10px;
-    margin: 0 -16px -16px;
     padding: 12px 16px 16px;
     background: var(--panel);
     border-top: 1px solid var(--line);
@@ -448,11 +438,6 @@
     padding: 10px;
     font-size: 14px;
   }
-  .go kbd {
-    background: rgba(27, 28, 30, 0.14);
-    color: var(--cue-ink);
-    box-shadow: none;
-  }
   .progress {
     display: grid;
     gap: 6px;
@@ -460,11 +445,6 @@
   .discord {
     justify-content: center;
     margin-bottom: 4px;
-  }
-  .qlink {
-    justify-content: center;
-    font-size: 12px;
-    color: var(--text-2);
   }
   .pbar {
     height: 6px;

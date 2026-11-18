@@ -487,6 +487,11 @@ export function exportSegments() {
     : [{ start: app.inPoint, end: app.outPoint, name: null }];
 }
 
+export function exportAction() {
+  if (app.queue.some((j) => j.status === "queued" || j.status === "running")) return "Добавить в очередь";
+  return app.segments.length > 1 && !app.opts.merge ? "Сохранить клипы" : "Сохранить клип";
+}
+
 /** Нарезки сохраняются рядом с повторами, в подпапку «Клипы»; целые записи — в «Записи». */
 export function clipsDir() {
   const root = app.settings?.outputDir ?? "";
@@ -500,6 +505,7 @@ export async function startExport() {
   const o = app.opts;
   const crop = videoCrop();
   const segments = exportSegments();
+  if (!segments.some((s) => s.end > s.start)) return;
   const req = {
     input: m.path,
     segments,
@@ -528,6 +534,7 @@ export async function startExport() {
       mixdown: o.mixdown,
     },
   };
+  app.tab = "export";
   player.el?.pause();
   app.result = null;
   app.error = "";

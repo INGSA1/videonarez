@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import { app, player, curRange, onVideoError, togglePlay, step, skip, setIn, setOut, playRange, addSegment, seek, videoCrop } from "../lib/store.svelte";
+  import { app, player, curRange, onVideoError, togglePlay, step, skip, setIn, setOut, playRange, seek, videoCrop } from "../lib/store.svelte";
   import { FRAME_ASPECTS, FRAME_DEFAULTS, MAX_CROP_ZOOM } from "../lib/presets";
   import { fmtTime, clamp } from "../lib/format";
   import Icon from "./Icon.svelte";
@@ -16,6 +16,7 @@
   let volume = $state(1);
   let muted = $state(false);
   let rate = $state(1);
+  let playbackDetails: HTMLDetailsElement;
   let raf = 0;
 
   $effect(() => {
@@ -177,6 +178,10 @@
 
   const range = $derived(curRange());
 
+  function closePlaybackOnOutsideClick(e: PointerEvent) {
+    if (playbackDetails?.open && e.target instanceof Node && !playbackDetails.contains(e.target)) playbackDetails.open = false;
+  }
+
   // Выделение поменялось (выбрали другой клип, сдвинули границу) — курсор возвращается внутрь.
   $effect(() => {
     const r = range;
@@ -184,6 +189,8 @@
     if (app.meta && (t < r.start || t > r.end)) untrack(() => seek(t));
   });
 </script>
+
+<svelte:window onpointerdown={closePlaybackOnOutsideClick} />
 
 <div class="player">
   <div class="stage" bind:this={stage} ondblclick={togglePlay} role="presentation">
@@ -224,18 +231,6 @@
       </button>
     {/if}
 
-    {#if app.meta?.hasVideo}
-      <button
-        class="frame-toggle"
-        class:active={app.editingFrame}
-        aria-expanded={app.editingFrame}
-        onclick={() => (app.editingFrame = !app.editingFrame)}
-        ondblclick={(e) => e.stopPropagation()}
-      >
-        <Icon name={app.editingFrame ? "check" : "crop"} /> {app.editingFrame ? "Готово" : "Кадрирование"}
-      </button>
-    {/if}
-
     {#if app.proxyPercent >= 0}
       <div class="overlay">
         <div class="ov-box">
@@ -248,7 +243,7 @@
   </div>
 
   {#if app.editingFrame}
-    <div class="frame-controls">
+    <div class="frame-controls" id="frame-controls">
       <label>
         Формат
         <select bind:value={app.opts.aspect} onchange={setAspect}>
@@ -264,49 +259,63 @@
         <span class="mono">{app.opts.cropZoom}%</span>
       </label>
       <button class="ghost" onclick={resetFrame}>Сбросить</button>
+      <button class="active" onclick={() => (app.editingFrame = false)}>Готово</button>
     </div>
   {/if}
 
   <div class="controls">
-    <div class="grp">
-      <button class="ghost icon" title="Назад 5 с (J)" onclick={() => skip(-5)}><Icon name="back5" /></button>
-      <button class="ghost icon" title="Кадр назад (←)" onclick={() => step(-1)}><Icon name="prev" /></button>
-      <button class="play" title="Пуск / пауза (Пробел)" onclick={togglePlay}>
+    <div class="transport">
+      <button class="play" title="Пуск / пауза (Пробел)" aria-label={app.playing ? "Пауза" : "Воспроизвести"} onclick={togglePlay}>
         <Icon name={app.playing ? "pause" : "play"} size={18} />
       </button>
-      <button class="ghost icon" title="Кадр вперёд (→)" onclick={() => step(1)}><Icon name="next" /></button>
-      <button class="ghost icon" title="Вперёд 5 с (L)" onclick={() => skip(5)}><Icon name="fwd5" /></button>
+      <div class="time">
+        <Timecode value={fmtTime(app.currentTime)} size={14} />
+        <span class="total"><Timecode value={fmtTime(app.meta?.duration ?? 0, 0)} size={10} tone="dim" /></span>
+      </div>
     </div>
 
-    <div class="time">
-      <Timecode value={fmtTime(app.currentTime)} size={17} />
-      <span class="total"><Timecode value={fmtTime(app.meta?.duration ?? 0)} size={11} tone="dim" /></span>
+    <div class="range-tools">
+      <button class="mark" title={`Начало ${fmtTime(range.start)}. Поставить на курсор (I)`} onclick={() => setIn(app.currentTime)}>
+        <Icon name="in" /> Начало
+      </button>
+      <button class="mark" title={`Конец ${fmtTime(range.end)}. Поставить на курсор (O)`} onclick={() => setOut(app.currentTime)}>
+        <Icon name="out" /> Конец
+      </button>
     </div>
 
-    <div class="grp mid">
-      <button class="mark" title="Поставить начало клипа (I)" onclick={() => setIn(app.currentTime)}>
-        <Icon name="in" /> <Timecode value={fmtTime(range.start)} size={11} />
-      </button>
-      <button class="mark" title="Поставить конец клипа (O)" onclick={() => setOut(app.currentTime)}>
-        <Icon name="out" /> <Timecode value={fmtTime(range.end)} size={11} />
-      </button>
-      <span class="len" title="Длительность выделения"><Timecode value={fmtTime(range.end - range.start, 1)} size={11} tone="cue" /></span>
-      <button class="ghost icon" title="Проиграть выделенное (P)" onclick={playRange}><Icon name="loop" /></button>
-      {#if app.selectedId === null}
-        <button title="Добавить выделение в список клипов (Enter)" onclick={() => addSegment()}>
-          <Icon name="plus" /> В список
+    <div class="view-tools">
+      {#if app.meta?.hasVideo}
+        <button class="frame-toggle ghost" class:active={app.editingFrame}
+          aria-expanded={app.editingFrame} onclick={() => (app.editingFrame = !app.editingFrame)}>
+          <Icon name="crop" /> Кадрирование
         </button>
       {/if}
-    </div>
-
-    <div class="grp right">
-      <select bind:value={rate} title="Скорость предпросмотра">
-        {#each [0.25, 0.5, 1, 1.5, 2] as r (r)}<option value={r}>{r}×</option>{/each}
-      </select>
-      <button class="ghost icon" title="Звук (M)" onclick={() => (muted = !muted)}>
-        <Icon name={muted ? "mute" : "volume"} />
-      </button>
-      <input type="range" min="0" max="1" step="0.01" bind:value={volume} class="vol" />
+      <details class="playback-options" bind:this={playbackDetails} onfocusout={(e) => {
+        if (e.relatedTarget instanceof Node && !e.currentTarget.contains(e.relatedTarget)) playbackDetails.open = false;
+      }}>
+        <summary class="disclosure" title="Управление воспроизведением">Ещё</summary>
+        <div class="playback-menu">
+          <div class="steps">
+            <button class="ghost icon" title="Назад 5 с (J)" aria-label="Назад 5 секунд" onclick={() => skip(-5)}><Icon name="back5" /></button>
+            <button class="ghost icon" title="Кадр назад (←)" aria-label="Кадр назад" onclick={() => step(-1)}><Icon name="prev" /></button>
+            <button class="ghost icon" title="Кадр вперёд (→)" aria-label="Кадр вперёд" onclick={() => step(1)}><Icon name="next" /></button>
+            <button class="ghost icon" title="Вперёд 5 с (L)" aria-label="Вперёд 5 секунд" onclick={() => skip(5)}><Icon name="fwd5" /></button>
+          </div>
+          <button class="ghost" title="Проиграть выделенное (P)" onclick={() => { playbackDetails.open = false; playRange(); }}><Icon name="loop" /> Просмотреть отрезок</button>
+          <label>
+            Скорость
+            <select bind:value={rate}>
+              {#each [0.25, 0.5, 1, 1.5, 2] as r (r)}<option value={r}>{r}×</option>{/each}
+            </select>
+          </label>
+          <div class="sound">
+            <button class="ghost icon" title="Звук (M)" aria-label={muted ? "Включить звук" : "Выключить звук"} onclick={() => (muted = !muted)}>
+              <Icon name={muted ? "mute" : "volume"} />
+            </button>
+            <input type="range" min="0" max="1" step="0.01" bind:value={volume} aria-label="Громкость предпросмотра" />
+          </div>
+        </div>
+      </details>
     </div>
   </div>
 </div>
@@ -338,13 +347,9 @@
     position: absolute;
     inset: 0;
   }
-  .frame-toggle {
-    position: absolute;
-    top: 10px;
-    right: 10px;
-  }
   .frame-controls {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 14px;
     padding: 6px 14px;
@@ -429,22 +434,17 @@
   .controls {
     display: flex;
     align-items: center;
-    gap: 16px;
-    padding: 8px 14px;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    padding: 7px 12px;
     background: var(--panel);
     border-top: 1px solid var(--line);
   }
-  .grp {
+  .transport, .range-tools, .view-tools, .steps, .sound {
     display: flex;
     align-items: center;
-    gap: 4px;
-  }
-  .grp.mid {
     gap: 6px;
-    margin-left: auto;
-  }
-  .grp.right {
-    margin-left: auto;
   }
   .play {
     width: 34px;
@@ -461,17 +461,44 @@
   .time {
     display: flex;
     align-items: baseline;
-    gap: 10px;
+    gap: 6px;
+  }
+  .total {
+    white-space: nowrap;
   }
   /* Метки In/Out — жёлтые, это точки монтажа. */
   .mark {
     background: var(--bg);
     box-shadow: inset 2px 0 0 var(--cue);
   }
-  .len {
-    padding: 6px 4px;
+  .playback-options {
+    position: relative;
   }
-  .vol {
-    width: 80px;
+  .playback-options .disclosure {
+    padding: 6px 8px;
+  }
+  .playback-menu {
+    position: absolute;
+    z-index: 2;
+    right: 0;
+    bottom: calc(100% + 8px);
+    width: 208px;
+    padding: 8px;
+    display: grid;
+    gap: 6px;
+    background: var(--panel-2);
+    border: 1px solid var(--line-2);
+    border-radius: var(--radius-lg);
+    box-shadow: 0 6px 18px #0005;
+  }
+  .playback-menu label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 6px;
+  }
+  .sound input {
+    min-width: 0;
+    flex: 1;
   }
 </style>

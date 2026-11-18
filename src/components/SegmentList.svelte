@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { app, addSegment, removeSegment, selectSegment, seek, segmentsFromPeaks, playRange } from "../lib/store.svelte";
-  import { fmtTime, parseTime, clamp } from "../lib/format";
+  import { app, addSegment, removeSegment, selectSegment, seek, segmentsFromPeaks, playRange, curRange } from "../lib/store.svelte";
+  import { fmtTime, fmtDur, parseTime, clamp } from "../lib/format";
   import Icon from "./Icon.svelte";
   import type { Segment } from "../lib/types";
 
   const total = $derived(app.segments.reduce((a, s) => a + (s.end - s.start), 0));
   const peaks = $derived(app.waveform?.markers.length ?? 0);
+  const range = $derived(curRange());
 
   function editTime(s: Segment, key: "start" | "end", value: string) {
     const t = parseTime(value);
@@ -22,28 +23,29 @@
 </script>
 
 <div class="list">
-  <div class="actions">
-    <button onclick={() => addSegment()} disabled={!app.meta || app.selectedId !== null} title="Добавить текущее выделение (Enter)">
-      <Icon name="plus" /> Добавить выделение
-    </button>
-    <button onclick={() => segmentsFromPeaks()} disabled={!peaks} title="Создать клипы вокруг громких моментов (8 с до пика, 4 с после)">
-      <Icon name="spark" /> Из пиков{peaks ? ` (${peaks})` : ""}
-    </button>
-  </div>
-
-  {#if !app.segments.length}
-    <div class="empty">
-      <p>Клипов пока нет.</p>
-      <p class="dim">
-        Отметьте начало клавишей <kbd>I</kbd>, конец клавишей <kbd>O</kbd> и нажмите <kbd>Enter</kbd>, чтобы добавить фрагмент в список.
-        Без списка экспортируется текущее выделение.
-      </p>
-      {#if app.waveLoading}<p class="dim">Ищу громкие моменты в звуке…</p>{/if}
+  {#if app.meta}
+    <div class="selection">
+      <div class="selection-title"><b>Текущий отрезок</b><span class="dim">{fmtDur(range.end - range.start)}</span></div>
+      <span class="dim">{fmtTime(range.start, 1)} – {fmtTime(range.end, 1)}</span>
     </div>
-  {:else}
+    {#if !app.segments.length}
+      <p class="hint dim">Отметьте начало и конец на шкале. Добавляйте отрезки в список, когда нужно сохранить несколько клипов.</p>
+    {/if}
+    <div class="actions">
+      <button onclick={() => addSegment()} disabled={app.selectedId !== null} title="Добавить текущее выделение (Enter)">
+        <Icon name="plus" /> Добавить в список
+      </button>
+      {#if peaks}
+        <button class="ghost" onclick={() => segmentsFromPeaks()} title="Создать клипы вокруг громких моментов (8 с до пика, 4 с после)">
+          <Icon name="spark" /> По звуку
+        </button>
+      {/if}
+    </div>
+  {/if}
+
+  {#if app.segments.length}
     <div class="summary dim">
       {app.segments.length} в списке, всего <span class="mono">{fmtTime(total, 1)}</span>
-      {#if app.selectedId !== null}<span class="editing">Ручки на шкале двигают выбранный клип.</span>{/if}
     </div>
     <div class="rows">
       {#each app.segments as s, i (s.id)}
@@ -80,24 +82,33 @@
     flex: 1;
   }
   .actions {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 6px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
   }
   .actions button {
     justify-content: center;
   }
-  .empty {
-    padding: 8px 0;
+  .selection {
+    display: grid;
+    gap: 4px;
+    padding: 10px 12px;
+    border: 1px solid var(--line-2);
+    border-radius: var(--radius-lg);
+    background: var(--panel-2);
   }
-  .empty p {
-    margin: 0 0 8px;
+  .selection-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  .hint {
+    margin: 0;
+    font-size: 12px;
   }
   .summary {
     font-size: 12px;
-  }
-  .editing {
-    color: var(--cue-text);
   }
   .rows {
     display: flex;
